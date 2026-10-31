@@ -1,0 +1,764 @@
+// UI wiring: connects controls, the device, the recorder and the chart.
+
+import { Chart, Minimap } from './chart.js';
+import * as files from './fileio.js';
+import * as fmt from './format.js';
+import { Ppk2Device } from './ppk2.js';
+import { DEFAULT_SPIKE_FILTER, MODIFIER_FIELDS, PowerMode, RANGE_COUNT, clamp, clampVdd } from './protocol.js';
+import { Recorder, SAMPLE_RATES } from './recorder.js';
+import { SampleStore } from './store.js';
+import { DemoTransport, SerialTransport } from './transport.js';
+
+const $ = (id) => document.getElementById(id);
+
+// ---- settings -------------------------------------------------------------
+
+const SETTINGS_KEY = 'ppk2.html.settings.v1';
+const DEFAULTS = {
+  rate: 100_000,
+  limit: 0,
+  buffer: 536_870_912,
+  spike: { ...DEFAULT_SPIKE_FILTER },
+  trigger: { enabled: false, level: 1000, unit: 1000, edge: 'rising', windowMs: 10, prePercent: 10, mode: 'single' },
+  yLog: false,
+  showDigital: true,
+  channels: 0xff,
+  spanSec: 1,
+  tool: 'pan',
+  csvDigital: true,
+};
+
+function loadSettings() {
+  const s = structuredClone(DEFAULTS);
+  try {
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    for (const [k, v] of Object.entries(saved)) {
+      if (!(k in s)) continue;
+      s[k] = typeof s[k] === 'object' ? { ...s[k], ...v } : v;
+    }
+  } catch {}
+  return s;
+}
+
+const settings = loadSettings();
+
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch {}
+}
+
+// ---- state ----------------------------------------------------------------
+
+const chart = new Chart($('chart'));
+new Minimap($('minimap'), chart);
+const recorder = new Recorder();
+
+let device = null;
+let connecting = false;
+let busy = false; // a file operation is running
+/** The recording on screen: its samples, header info ({ startedAt, mode, vdd, source }) and save state. */
+let session = { store: null, info: null, unsaved: false };
+
+const isRecording = () => !!device?.sampling;
+const hasUnsaved = () => session.unsaved && !!session.store?.length;
+
+chart.rate = settings.rate;
+chart.setSpanSeconds(settings.spanSec);
+chart.configure({
+  tool: settings.tool,
+  yLog: settings.yLog,
+  showDigital: settings.showDigital,
+  channels: settings.channels,
+});
+
+// ---- helpers --------------------------------------------------------------
+
+let toastTimer = 0;
+function toast(message, kind = 'info', ms = 4500) {
+  const el = $('toast');
+  el.textContent = message;
+  el.dataset.kind = kind;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  if (ms) toastTimer = setTimeout(() => (el.hidden = true), ms);
+}
+
+function reportError(e) {
+  console.error(e);
+  toast(e.message || String(e), 'error', 8000);
+}
+
+async function guarded(fn) {
+  try {
+    await fn();
+  } catch (e) {
+    reportError(e);
+  }
+}
+
+/** Write text/markup only when it changed, so periodic refreshes don't churn the DOM. */
+function setText(el, text) {
+  if (el.textContent !== text) el.textContent = text;
+}
+
+function setHTML(el, html) {
+  if (el._html !== html) {
+    el._html = html;
+    el.innerHTML = html;
+  }
+}
+
+/** Read a number input, clamp it, write the clamped value back and return it. */
+function readNumber(el, { min = -Infinity, max = Infinity, fallback, round = false }) {
+  let v = Number(el.value);
+  v = clamp(Number.isFinite(v) && el.value !== '' ? v : fallback, min, max);
+  if (round) v = Math.round(v);
+  el.value = v;
+  return v;
+}
+
+function segmented(id, value, onChange) {
+  const buttons = [...$(id).querySelectorAll('button')];
+  const set = (v) => buttons.forEach((b) => b.setAttribute('aria-checked', String(b.dataset.value === String(v))));
+  for (const b of buttons) {
+    b.addEventListener('click', () => {
+      set(b.dataset.value);
+      onChange(b.dataset.value);
+    });
+  }
+  set(value);
+  return { set, disable: (d) => buttons.forEach((b) => (b.disabled = d)) };
+}
+
+const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+function definitionList(rows) {
+  return rows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join('');
+}
+
+// ---- device ---------------------------------------------------------------
+
+async function connect(makeTransport) {
+  if (device || connecting) return;
+  let transport;
+  try {
+    transport = await makeTransport();
+  } catch (e) {
+    if (e.name !== 'NotFoundError') toast(e.message, 'error');
+    return;
+  }
+  connecting = true;
+  syncUI();
+  const dev = new Ppk2Device(transport);
+  dev.onclose = () => onDeviceLost(dev);
+  try {
+    await dev.open();
+    dev.setSpikeFilter(settings.spike);
+    await dev.setMode(dev.mode);
+    if (dev.mode === PowerMode.Source) await dev.setVdd(dev.vdd);
+    await dev.setDutPower(false);
+    device = dev;
+    renderDevice();
+  } catch (e) {
+    await dev.close().catch(() => {});
+    reportError(
+      e.name === 'InvalidStateError' || e.name === 'NetworkError'
+        ? new Error('The PPK2 is in use by another app. Close nRF Connect Power Profiler or any serial terminal, then connect again.')
+        : e,
+    );
+  } finally {
+    connecting = false;
+    syncUI();
+  }
+}
+
+async function connectSerial() {
+  const known = await SerialTransport.known();
+  return known.length === 1 ? known[0] : SerialTransport.request();
+}
+
+async function disconnect() {
+  if (!device) return;
+  if (isRecording()) await endRecording();
+  const dev = device;
+  device = null;
+  await dev.close().catch(() => {});
+  syncUI();
+}
+
+function onDeviceLost(dev) {
+  if (device !== dev) return;
+  device = null;
+  endRecording();
+  toast('The PPK2 was disconnected. Your recording so far is kept.', 'error', 8000);
+}
+
+function renderDevice() {
+  const meta = device.metadata;
+  $('device-facts').innerHTML = definitionList([
+    ['Device', device.label],
+    ['Hardware', meta.hw ?? 'unknown'],
+    ['Calibration', meta.hasCalibration ? 'Loaded from device' : 'Missing'],
+  ]);
+  $('uncalibrated').hidden = meta.hasCalibration;
+  modeSeg.set(device.mode);
+  setVddInputs(device.vdd);
+  $('dut-power').checked = device.dutPower;
+
+  // Range gains
+  const gains = $('gains');
+  gains.innerHTML = '';
+  device.userGains.forEach((gain, r) => {
+    const label = document.createElement('label');
+    label.htmlFor = `gain-${r}`;
+    label.textContent =
+      r === 0 ? 'Range 1, lowest current' : r === RANGE_COUNT - 1 ? `Range ${r + 1}, highest current` : `Range ${r + 1}`;
+    const wrap = document.createElement('span');
+    wrap.className = 'num-unit';
+    const input = Object.assign(document.createElement('input'), {
+      type: 'number',
+      id: `gain-${r}`,
+      min: '80',
+      max: '120',
+      step: '0.1',
+      value: (gain * 100).toFixed(1),
+    });
+    input.addEventListener('change', () =>
+      guarded(() => device?.setUserGain(r, readNumber(input, { min: 80, max: 120, fallback: 100 }) / 100)),
+    );
+    wrap.append(input, ' %');
+    gains.append(label, wrap);
+  });
+
+  // Calibration table
+  const m = meta.modifiers;
+  const head = Array.from({ length: RANGE_COUNT }, (_, r) => `<th>${r + 1}</th>`).join('');
+  const body = MODIFIER_FIELDS.map(
+    ([key, name, description]) =>
+      `<tr><th title="${escapeHtml(description)}">${name}</th>${m[key]
+        .map((v) => `<td>${escapeHtml(Number(v).toPrecision(6))}</td>`)
+        .join('')}</tr>`,
+  ).join('');
+  $('calib-table').innerHTML = `<table><thead><tr><th></th>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+// ---- recording ------------------------------------------------------------
+
+/** Push the trigger settings to the recorder and the chart's level line. */
+function applyTrigger() {
+  const t = settings.trigger;
+  recorder.trigger.configure(t);
+  chart.configure({ triggerLevel: isRecording() && t.enabled ? t.level : null });
+}
+
+async function startRecording() {
+  if (!device || isRecording()) return;
+  if (hasUnsaved() && !confirm('Starting a new recording discards the current one. Continue?')) return;
+  recorder.trigger.configure(settings.trigger);
+  const store = recorder.begin({
+    rate: settings.rate,
+    maxBytes: settings.buffer,
+    limitSec: settings.limit,
+    triggerEnabled: settings.trigger.enabled,
+  });
+  session = {
+    store,
+    info: { startedAt: new Date().toISOString(), mode: device.mode, vdd: device.vdd, source: device.label },
+    unsaved: true,
+  };
+  chart.setStore(store);
+  chart.setLive(true);
+  chart.setSpanSeconds(settings.spanSec);
+  device.onsample = recorder.sink;
+  try {
+    await device.start();
+  } catch (e) {
+    toast(`Couldn't start sampling: ${e.message}`, 'error');
+  }
+  applyTrigger();
+  syncUI();
+}
+
+/** The one way a recording ends: stop button, limit, single trigger, failed start or unplugged device. */
+async function endRecording() {
+  recorder.end();
+  chart.configure({ triggerLevel: null });
+  syncUI();
+  if (device?.sampling) await device.stop().catch(() => {});
+  syncUI();
+}
+
+recorder.onlimit = () => {
+  endRecording();
+  toast(`Stopped after ${fmt.humanDuration(settings.limit)}, as set in Stop after.`);
+};
+
+recorder.trigger.oncapture = (capture, { final }) => {
+  chart.configure({ triggerMarker: capture.trigger });
+  chart.setView(capture.from, capture.to);
+  if (final) endRecording();
+  else syncUI();
+};
+
+// ---- controls -------------------------------------------------------------
+
+const modeSeg = segmented('mode', PowerMode.Source, (v) =>
+  guarded(async () => {
+    if (!device) return;
+    const mode = Number(v);
+    await device.setMode(mode);
+    if (mode === PowerMode.Source) await device.setVdd(Number($('vdd-num').value));
+    syncUI();
+  }),
+);
+
+function setVddInputs(mV) {
+  $('vdd').value = mV;
+  $('vdd-num').value = mV;
+}
+
+async function applyVdd(mV) {
+  const v = clampVdd(mV);
+  setVddInputs(v);
+  if (device?.mode !== PowerMode.Source) return;
+  await device.setVdd(v);
+  if (isRecording()) session.info.vdd = v;
+}
+
+$('vdd').addEventListener('input', () => ($('vdd-num').value = $('vdd').value));
+$('vdd').addEventListener('change', () => guarded(() => applyVdd(Number($('vdd').value))));
+$('vdd-num').addEventListener('change', () => guarded(() => applyVdd(Number($('vdd-num').value) || 3000)));
+$('dut-power').addEventListener('change', () => guarded(() => device?.setDutPower($('dut-power').checked)));
+
+$('btn-connect').addEventListener('click', () => connect(connectSerial));
+$('btn-demo').addEventListener('click', () => connect(async () => new DemoTransport()));
+$('btn-disconnect').addEventListener('click', () => guarded(disconnect));
+$('btn-start').addEventListener('click', () => guarded(() => (isRecording() ? endRecording() : startRecording())));
+
+// Sample rate, duration and memory
+for (const rate of SAMPLE_RATES) $('rate').add(new Option(fmt.rateLabel(rate), String(rate)));
+$('rate').value = String(settings.rate);
+$('rate').addEventListener('change', () => {
+  settings.rate = Number($('rate').value);
+  saveSettings();
+  syncUI();
+});
+$('limit').value = settings.limit || '';
+$('limit').addEventListener('change', () => {
+  settings.limit = readNumber($('limit'), { min: 0, fallback: 0 });
+  $('limit').value = settings.limit || '';
+  saveSettings();
+});
+$('buffer').value = String(settings.buffer);
+$('buffer').addEventListener('change', () => {
+  settings.buffer = Number($('buffer').value);
+  saveSettings();
+  syncUI();
+});
+
+// Trigger
+const trig = settings.trigger;
+$('trig-on').checked = trig.enabled;
+$('trig-unit').value = String(trig.unit);
+$('trig-level').value = +(trig.level / trig.unit).toPrecision(6);
+$('trig-window').value = trig.windowMs;
+$('trig-pre').value = trig.prePercent;
+segmented('trig-edge', trig.edge, (v) => updateTrigger({ edge: v }));
+segmented('trig-mode', trig.mode, (v) => updateTrigger({ mode: v }));
+
+function updateTrigger(patch) {
+  Object.assign(settings.trigger, patch);
+  saveSettings();
+  if ('enabled' in patch && isRecording()) {
+    if (patch.enabled) recorder.trigger.arm();
+    else recorder.trigger.disarm();
+  }
+  applyTrigger();
+  syncUI();
+}
+
+const triggerLevel = () => (Number($('trig-level').value) || 0) * Number($('trig-unit').value);
+$('trig-on').addEventListener('change', () => updateTrigger({ enabled: $('trig-on').checked }));
+$('trig-level').addEventListener('change', () => updateTrigger({ level: triggerLevel() }));
+$('trig-unit').addEventListener('change', () =>
+  updateTrigger({ unit: Number($('trig-unit').value), level: triggerLevel() }),
+);
+$('trig-window').addEventListener('change', () =>
+  updateTrigger({ windowMs: readNumber($('trig-window'), { min: 0.01, fallback: 10 }) }),
+);
+$('trig-pre').addEventListener('change', () =>
+  updateTrigger({ prePercent: readNumber($('trig-pre'), { min: 0, max: 90, fallback: 0 }) }),
+);
+
+// Display
+segmented('yscale', settings.yLog ? 'log' : 'linear', (v) => {
+  settings.yLog = v === 'log';
+  chart.configure({ yLog: settings.yLog });
+  saveSettings();
+});
+$('show-digital').checked = settings.showDigital;
+$('show-digital').addEventListener('change', () => {
+  settings.showDigital = $('show-digital').checked;
+  chart.configure({ showDigital: settings.showDigital });
+  saveSettings();
+});
+for (let ch = 0; ch < 8; ch++) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = `D${ch}`;
+  const pressed = () => b.setAttribute('aria-pressed', String(!!(settings.channels & (1 << ch))));
+  pressed();
+  b.addEventListener('click', () => {
+    settings.channels ^= 1 << ch;
+    chart.configure({ channels: settings.channels });
+    pressed();
+    saveSettings();
+  });
+  $('channels').append(b);
+}
+
+// Spike filter
+const spikeInputs = { samples: $('spike-samples'), alpha: $('spike-alpha'), alpha5: $('spike-alpha5') };
+function applySpike() {
+  for (const [k, el] of Object.entries(spikeInputs)) el.value = settings.spike[k];
+  device?.setSpikeFilter(settings.spike);
+  saveSettings();
+}
+for (const [k, el] of Object.entries(spikeInputs)) {
+  el.addEventListener('change', () => {
+    const [min, max, round] = k === 'samples' ? [1, 10, true] : [0.01, 1, false];
+    settings.spike[k] = readNumber(el, { min, max, round, fallback: DEFAULT_SPIKE_FILTER[k] });
+    applySpike();
+  });
+}
+$('btn-spike-reset').addEventListener('click', () => {
+  settings.spike = { ...DEFAULT_SPIKE_FILTER };
+  applySpike();
+});
+for (const [k, el] of Object.entries(spikeInputs)) el.value = settings.spike[k];
+
+// Chart toolbar
+segmented('tool', settings.tool, (v) => {
+  settings.tool = v;
+  chart.configure({ tool: v });
+  saveSettings();
+});
+const SPANS = [0.001, 0.01, 0.1, 0.5, 1, 3, 10, 30, 60, 300, 600, 1800, 3600];
+const spanSelect = $('span');
+const customSpan = new Option('', 'custom');
+customSpan.hidden = true;
+spanSelect.add(customSpan);
+for (const s of SPANS) spanSelect.add(new Option(s < 60 ? fmt.si(s, 's', 1) : `${s / 60} min`, String(s)));
+spanSelect.addEventListener('change', () => {
+  if (spanSelect.value === 'custom') return;
+  settings.spanSec = Number(spanSelect.value);
+  chart.setSpanSeconds(settings.spanSec);
+  saveSettings();
+});
+$('btn-zoom-in').addEventListener('click', () => chart.zoom(0.5));
+$('btn-zoom-out').addEventListener('click', () => chart.zoom(2));
+$('btn-fit').addEventListener('click', () => chart.fitAll());
+$('btn-live').addEventListener('click', () => chart.setLive(!chart.live));
+
+chart.onselect = () => requestStats();
+chart.onviewchange = () => requestStats();
+
+// Files
+$('csv-digital').checked = settings.csvDigital;
+$('csv-digital').addEventListener('change', () => {
+  settings.csvDigital = $('csv-digital').checked;
+  saveSettings();
+});
+
+async function fileTask(label, fn) {
+  if (busy) return;
+  busy = true;
+  syncUI();
+  let last = 0;
+  const progress = (f) => {
+    const now = performance.now();
+    if (now - last > 250) {
+      last = now;
+      toast(`${label}… ${Math.round(f * 100)} %`, 'info', 0);
+    }
+  };
+  try {
+    await fn(progress);
+  } catch (e) {
+    if (files.isAbort(e)) $('toast').hidden = true;
+    else reportError(e);
+  } finally {
+    busy = false;
+    syncUI();
+  }
+}
+
+$('btn-save').addEventListener('click', () =>
+  fileTask('Saving', async (progress) => {
+    await files.saveSession(session.store, session.info, progress);
+    session.unsaved = false;
+    toast('Recording saved.');
+  }),
+);
+
+$('btn-open').addEventListener('click', () => {
+  if (isRecording()) return toast('Stop sampling before opening a recording.');
+  if (hasUnsaved() && !confirm('Opening a file discards the current recording. Continue?')) return;
+  $('file-open').click();
+});
+$('file-open').addEventListener('change', () => {
+  const file = $('file-open').files[0];
+  $('file-open').value = '';
+  if (!file) return;
+  fileTask('Opening', async (progress) => {
+    const { store, header } = await files.loadSession(file, settings.buffer, progress);
+    const { startedAt, mode, vdd, source } = header;
+    session = { store, info: { startedAt, mode, vdd, source }, unsaved: false };
+    chart.setStore(store);
+    chart.yAuto = true;
+    chart.fitAll();
+    toast(`Opened ${file.name}.`);
+  });
+});
+
+$('btn-csv-sel').addEventListener('click', () => {
+  const sel = chart.selection;
+  if (!sel) return;
+  fileTask('Exporting', async (progress) => {
+    await files.exportCsv(session.store, sel.a, sel.b, { digital: settings.csvDigital }, progress);
+    toast('Selection exported.');
+  });
+});
+$('btn-csv-all').addEventListener('click', () => {
+  const store = session.store;
+  const rows = store.length;
+  if (rows > 20_000_000 && !confirm(`This writes ${(rows / 1e6).toFixed(0)} million rows, which takes a while and makes a large file. Continue?`)) return;
+  fileTask('Exporting', async (progress) => {
+    await files.exportCsv(store, store.start, store.end, { digital: settings.csvDigital }, progress);
+    toast('Recording exported.');
+  });
+});
+$('btn-png').addEventListener('click', () => files.savePng($('chart')));
+
+// Keyboard: space starts and stops when focus isn't in a form control.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== ' ' || e.repeat || !device) return;
+  if (['INPUT', 'SELECT', 'BUTTON', 'TEXTAREA', 'SUMMARY'].includes(e.target.tagName)) return;
+  e.preventDefault();
+  guarded(() => (isRecording() ? endRecording() : startRecording()));
+});
+
+window.addEventListener('beforeunload', (e) => {
+  if (!hasUnsaved()) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
+
+// ---- view updates ---------------------------------------------------------
+
+function triggerStatus() {
+  const t = settings.trigger;
+  const trg = recorder.trigger;
+  if (!t.enabled) return '';
+  if (isRecording()) {
+    if (trg.state === 'capturing') return 'Triggered, capturing…';
+    if (t.mode === 'continuous' && trg.captures) return `${trg.captures} captures so far.`;
+    return `Waiting for current to ${t.edge === 'rising' ? 'rise above' : 'fall below'} ${fmt.current(t.level)}.`;
+  }
+  // Only describe a capture if it belongs to the recording on screen.
+  if (trg.last && recorder.store === session.store) {
+    return `Triggered at ${fmt.duration(session.store.timeOf(trg.last.trigger), 6)}. Press Start to arm it again.`;
+  }
+  return 'Press Start to arm the trigger.';
+}
+
+function syncUI() {
+  const connected = !!device;
+  const recording = isRecording();
+  $('conn').dataset.state = recording ? 'rec' : connected ? 'on' : 'off';
+  setText(
+    $('conn-text'),
+    connecting
+      ? 'Connecting…'
+      : recording
+        ? `Sampling at ${fmt.rateLabel(recorder.rate)}`
+        : connected
+          ? `Connected to ${device.label}`
+          : 'Not connected',
+  );
+
+  for (const el of document.querySelectorAll('[data-when="disconnected"]')) el.hidden = connected;
+  for (const el of document.querySelectorAll('[data-when="connected"]')) el.hidden = !connected;
+  $('btn-connect').disabled = connecting || !SerialTransport.supported;
+  $('btn-demo').disabled = connecting;
+  for (const el of document.querySelectorAll('[data-needs="device"]')) el.dataset.disabled = String(!connected);
+
+  const source = !connected || device.mode === PowerMode.Source;
+  $('vdd-field').hidden = !source;
+  setText(
+    $('mode-hint'),
+    source
+      ? 'The PPK2 powers your device from VOUT and measures what it draws.'
+      : 'Wire the PPK2 in series with your own supply: supply to VIN, your device to VOUT.',
+  );
+  modeSeg.disable(recording);
+
+  const start = $('btn-start');
+  setText(start, recording ? 'Stop' : settings.trigger.enabled ? 'Start and wait for trigger' : 'Start');
+  start.dataset.running = String(recording);
+  start.disabled = !connected;
+  $('rate').disabled = recording;
+
+  const hasData = !!session.store?.length;
+  const fileBlocked = recording || busy;
+  $('btn-save').disabled = !hasData || fileBlocked;
+  $('btn-csv-all').disabled = !hasData || fileBlocked;
+  $('btn-open').disabled = fileBlocked;
+  $('btn-png').disabled = !hasData;
+  $('chart-empty').hidden = hasData || recording;
+
+  setText(
+    $('buffer-hint'),
+    `Keeps the last ${fmt.humanDuration(SampleStore.capacityFor(settings.buffer) / settings.rate)} at ${fmt.rateLabel(settings.rate)}. Change the memory limit under Advanced.`,
+  );
+
+  const summary = $('trig-summary');
+  const tState = recorder.trigger.state;
+  setText(
+    summary,
+    !settings.trigger.enabled ? 'Off' : recording && tState === 'armed' ? 'Waiting' : recording && tState === 'capturing' ? 'Capturing' : 'On',
+  );
+  summary.dataset.on = String(settings.trigger.enabled);
+  setText($('trig-status'), triggerStatus());
+
+  requestStats();
+}
+
+let statsQueued = false;
+function requestStats() {
+  if (statsQueued) return;
+  statsQueued = true;
+  requestAnimationFrame(() => {
+    statsQueued = false;
+    updateStats();
+  });
+}
+
+function statsRows(store, from, to) {
+  const agg = store.aggregate(from, to);
+  if (!agg.n) return null;
+  const chargeUC = agg.sum / store.sampleRate;
+  const rows = [
+    ['Average', fmt.current(agg.mean)],
+    ['Max', fmt.current(agg.validMax)],
+    ['Time', fmt.duration(agg.n / store.sampleRate)],
+    ['Charge', fmt.charge(chargeUC)],
+  ];
+  const { mode, vdd } = session.info ?? {};
+  if (mode === PowerMode.Source && vdd) rows.push(['Energy', fmt.energy(chargeUC * (vdd / 1000))]);
+  return rows;
+}
+
+function updateStats() {
+  const store = session.store;
+  const recording = isRecording();
+
+  // Live meter
+  const meter = $('meter');
+  if (recording && store?.length) {
+    const agg = store.aggregate(store.end - store.sampleRate * 0.5, store.end);
+    const { num, unit } = fmt.currentParts(agg.mean);
+    setText($('meter-num'), num);
+    setText($('meter-unit'), unit);
+    setText(
+      $('meter-sub'),
+      device.mode === PowerMode.Source && !device.dutPower
+        ? 'Power output is off. Turn on Enable power output to power your device.'
+        : agg.cnt
+          ? `Peak ${fmt.current(agg.max)} over the last 0.5 s`
+          : 'No data in the last 0.5 s',
+    );
+    setText($('meter-label'), 'Live average');
+    meter.dataset.state = 'live';
+  } else if (recording) {
+    setText($('meter-sub'), 'Waiting for data…');
+  } else {
+    meter.dataset.state = 'idle';
+    setText($('meter-label'), store?.length ? 'Last reading' : 'Live average');
+    setText(
+      $('meter-sub'),
+      !device
+        ? store?.length
+          ? 'Recording stopped'
+          : 'Connect a PPK2 and press Start'
+        : store?.length
+          ? 'Stopped. Press Start for a new recording.'
+          : 'Press Start to measure',
+    );
+  }
+
+  // Window and selection
+  const [from, to] = chart.visibleRange();
+  const win = store ? statsRows(store, from, to) : null;
+  setHTML($('stats-window'), definitionList(win ?? [['Average', '—'], ['Max', '—'], ['Time', '—'], ['Charge', '—']]));
+  const sel = chart.selection && store ? statsRows(store, chart.selection.a, chart.selection.b) : null;
+  setHTML($('stats-sel'), sel ? definitionList(sel) : '');
+  $('stats-sel-empty').hidden = !!sel;
+  $('btn-csv-sel').disabled = !sel || recording || busy;
+
+  // Toolbar
+  $('btn-live').setAttribute('aria-pressed', String(chart.live));
+  const span = chart.spanSeconds;
+  const preset = SPANS.find((s) => Math.abs(s - span) / s < 0.01);
+  if (preset) spanSelect.value = String(preset);
+  else {
+    setText(customSpan, fmt.duration(span, 3));
+    spanSelect.value = 'custom';
+  }
+
+  const parts = [];
+  if (store?.length) {
+    parts.push(`${fmt.humanDuration(store.duration)} recorded`);
+    if (store.droppedSamples) parts.push('<span class="warn">memory full, oldest data dropped</span>');
+    else if (recording) parts.push(`memory ${Math.round((store.length / store.capacity) * 100)} % used`);
+  }
+  if (recording && device.lostSamples) parts.push(`<span class="warn">${device.lostSamples.toLocaleString()} samples lost</span>`);
+  if (recording && device.overruns) parts.push(`<span class="warn">${device.overruns} USB overruns</span>`);
+  setHTML($('tool-status'), parts.join(', '));
+}
+
+setInterval(() => {
+  if (isRecording()) syncUI();
+  else updateStats();
+}, 250);
+
+// ---- start ----------------------------------------------------------------
+
+if (!SerialTransport.supported) $('unsupported').hidden = false;
+syncUI();
+
+// Handle for poking at things from the browser console.
+window.ppk2 = {
+  chart,
+  recorder,
+  settings,
+  get device() {
+    return device;
+  },
+  get session() {
+    return session;
+  },
+};
+
+// ?demo connects the simulated device and starts sampling straight away.
+if (new URLSearchParams(location.search).has('demo')) {
+  connect(async () => new DemoTransport()).then(() =>
+    guarded(async () => {
+      if (!device) return;
+      await device.setDutPower(true);
+      $('dut-power').checked = true;
+      await startRecording();
+    }),
+  );
+}

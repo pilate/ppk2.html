@@ -1,0 +1,937 @@
+// Canvas chart for current and digital channels, plus the overview strip.
+
+import * as fmt from './format.js';
+import { Agg } from './store.js';
+
+const AXIS_W = 76;
+const RIGHT_PAD = 16;
+const TOP_PAD = 12;
+const TIME_AXIS_H = 28;
+const LANE_H = 18;
+const LANE_GAP = 10;
+const LOG_FLOOR = 1e-3; // µA (1 nA)
+const LOG_CEIL = 1e8; // µA (100 A)
+const MIN_SPAN = 10; // samples
+
+function cssVar(el, name, fallback) {
+  return getComputedStyle(el).getPropertyValue(name).trim() || fallback;
+}
+
+function popcount(x) {
+  let n = 0;
+  for (; x; x &= x - 1) n++;
+  return n;
+}
+
+/** Size a canvas's backing store to its CSS box at device resolution. */
+function fitCanvas(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.round(rect.width * dpr));
+  canvas.height = Math.max(1, Math.round(rect.height * dpr));
+  return { cssW: Math.max(1, rect.width), cssH: Math.max(1, rect.height), dpr };
+}
+
+const toLog = (v) => Math.log10(Math.max(LOG_FLOOR, v));
+
+/**
+ * Summarise `n` equal columns starting at sample `from` into `out` arrays
+ * (min and max required; mean, or, and optional). Returns the overall { lo, hi }.
+ */
+function aggregateColumns(store, from, perCol, n, out, agg = new Agg()) {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let k = 0; k < n; k++) {
+    const a = from + k * perCol;
+    store.aggregate(a, a + perCol, agg.reset());
+    out.min[k] = agg.validMin;
+    out.max[k] = agg.validMax;
+    if (out.mean) {
+      out.mean[k] = agg.mean;
+      out.or[k] = agg.n ? agg.or : 0;
+      out.and[k] = agg.n ? agg.and : 0;
+    }
+    if (agg.cnt) {
+      if (agg.min < lo) lo = agg.min;
+      if (agg.max > hi) hi = agg.max;
+    }
+  }
+  return { lo, hi };
+}
+
+export class Chart {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.store = null;
+    this.rate = 100_000;
+    this.viewStart = -100_000;
+    this.viewSpan = 100_000;
+    this.live = true;
+    this.selection = null; // { a, b } sample indices, a <= b
+    this.tool = 'pan';
+    this.yAuto = true;
+    this.yMin = 0;
+    this.yMax = 1000;
+    this.yLog = false;
+    this.showDigital = true;
+    this.channels = 0xff;
+    this.triggerLevel = null; // µA, drawn as a dashed line while armed
+    this.triggerMarker = null; // sample index
+    this.hover = null; // { x, y } css px
+    this.onselect = null;
+    this.onviewchange = null;
+    this.minimap = null;
+
+    this._cols = 0;
+    this._raw = { v: new Float64Array(0), b: new Uint8Array(0), from: 0, n: 0 };
+    this._agg = new Agg();
+    this._dataKey = '';
+    this._lo = Infinity;
+    this._hi = -Infinity;
+    this._drag = null;
+    this._dirty = true;
+    this._lastVersion = -1;
+    this._lastFrame = 0;
+
+    this.readColors();
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      this.readColors();
+      this.invalidate();
+    });
+
+    new ResizeObserver(() => {
+      Object.assign(this, fitCanvas(canvas));
+      this.invalidate();
+    }).observe(canvas);
+    Object.assign(this, fitCanvas(canvas));
+    this._bindInput();
+    const loop = (now) => {
+      this._frame(now);
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  }
+
+  readColors() {
+    const el = this.canvas;
+    this.colors = {
+      bg: cssVar(el, '--plot-bg', '#fff'),
+      grid: cssVar(el, '--grid', '#e3e8eb'),
+      axis: cssVar(el, '--axis-text', '#5d6a73'),
+      trace: cssVar(el, '--trace', '#0b5cad'),
+      select: cssVar(el, '--select', '#c77700'),
+      selectFill: cssVar(el, '--select-fill', 'rgba(199,119,0,.12)'),
+      trigger: cssVar(el, '--trigger', '#b3261e'),
+      digital: cssVar(el, '--digital', '#2f7d5b'),
+      laneBg: cssVar(el, '--lane-bg', '#f3f6f7'),
+      cursor: cssVar(el, '--cursor', '#1a2126'),
+      font: cssVar(el, '--chart-font', '12px sans-serif'),
+    };
+  }
+
+  /**
+   * Change display options and redraw: tool, yLog, showDigital, channels,
+   * triggerLevel, triggerMarker. Switching the axis scale refits it.
+   */
+  configure(patch) {
+    if ('yLog' in patch && patch.yLog !== this.yLog) this.yAuto = true;
+    Object.assign(this, patch);
+    this.invalidate();
+  }
+
+  setStore(store) {
+    this.store = store;
+    this.rate = store?.sampleRate ?? this.rate;
+    this.selection = null;
+    this.triggerMarker = null;
+    this.invalidate();
+  }
+
+  invalidate() {
+    this._dirty = true;
+  }
+
+  // ---- view ---------------------------------------------------------------
+
+  get dataStart() {
+    return this.store ? this.store.start : 0;
+  }
+
+  get dataEnd() {
+    return this.store ? this.store.end : 0;
+  }
+
+  get spanSeconds() {
+    return this.viewSpan / this.rate;
+  }
+
+  _viewChanged() {
+    this._clampView();
+    this.invalidate();
+    this.onviewchange?.();
+  }
+
+  setLive(on) {
+    this.live = on;
+    this._viewChanged();
+  }
+
+  setSpanSeconds(seconds) {
+    this._setSpan(Math.max(MIN_SPAN, seconds * this.rate), 0.5);
+  }
+
+  setView(from, to) {
+    this.live = false;
+    this.viewStart = from;
+    this.viewSpan = Math.max(MIN_SPAN, to - from);
+    this._viewChanged();
+  }
+
+  fitAll() {
+    if (!this.store || this.store.length < 2) return;
+    this.setView(this.dataStart, this.dataEnd);
+  }
+
+  zoom(factor, anchorFrac = 0.5) {
+    this._setSpan(this._clampSpan(this.viewSpan * factor), anchorFrac);
+  }
+
+  /** Change the span keeping the point at `anchorFrac` of the width fixed (or the right edge when live). */
+  _setSpan(span, anchorFrac) {
+    if (!this.live) this.viewStart += anchorFrac * (this.viewSpan - span);
+    this.viewSpan = span;
+    this._viewChanged();
+  }
+
+  pan(fraction) {
+    this.live = false;
+    this.viewStart += fraction * this.viewSpan;
+    this._viewChanged();
+  }
+
+  visibleRange() {
+    const from = this.live ? this.dataEnd - this.viewSpan : this.viewStart;
+    return [from, from + this.viewSpan];
+  }
+
+  clearSelection() {
+    if (!this.selection) return;
+    this.selection = null;
+    this.invalidate();
+    this.onselect?.(null);
+  }
+
+  _clampSpan(span) {
+    const len = this.store ? this.store.length : 0;
+    const max = this.live ? Math.max(len, this.rate * 3600) : Math.max(len, MIN_SPAN * 10);
+    return Math.min(max, Math.max(MIN_SPAN, span));
+  }
+
+  _clampView() {
+    if (this.live) return;
+    const lo = this.dataStart;
+    const hi = this.dataEnd;
+    const span = this.viewSpan;
+    if (span >= hi - lo) this.viewStart = Math.min(lo, Math.max(hi - span, this.viewStart));
+    else this.viewStart = Math.min(hi - span, Math.max(lo, this.viewStart));
+  }
+
+  // ---- layout and scales --------------------------------------------------
+
+  layout() {
+    const lanes = this.showDigital ? popcount(this.channels) : 0;
+    const digitalH = lanes ? lanes * LANE_H + LANE_GAP : 0;
+    const plot = {
+      x: AXIS_W,
+      y: TOP_PAD,
+      w: Math.max(10, this.cssW - AXIS_W - RIGHT_PAD),
+      h: Math.max(40, this.cssH - TOP_PAD - TIME_AXIS_H - digitalH),
+    };
+    const digital = { x: plot.x, y: plot.y + plot.h + LANE_GAP, w: plot.w, h: lanes * LANE_H, lanes };
+    const bottom = lanes ? digital.y + digital.h : plot.y + plot.h;
+    return { plot, digital, bottom, axisY: this.cssH - TIME_AXIS_H };
+  }
+
+  indexAtX(x) {
+    const { plot } = this.layout();
+    return this.visibleRange()[0] + ((x - plot.x) / plot.w) * this.viewSpan;
+  }
+
+  /** Visible current range in axis units (log10 µA in log mode). */
+  _yDomain() {
+    return this.yLog ? [toLog(this.yMin), toLog(this.yMax)] : [this.yMin, this.yMax];
+  }
+
+  _yMap(plot) {
+    const [lo, hi] = this._yDomain();
+    const k = plot.h / (hi - lo);
+    const bottom = plot.y + plot.h;
+    return this.yLog ? (v) => bottom - (toLog(v) - lo) * k : (v) => bottom - (v - lo) * k;
+  }
+
+  _valueAtY(y, plot) {
+    const [lo, hi] = this._yDomain();
+    const u = lo + ((plot.y + plot.h - y) / plot.h) * (hi - lo);
+    return this.yLog ? 10 ** u : u;
+  }
+
+  /** Set the current axis, keeping it finite, non-empty and (in log mode) between 1 nA and 100 A. */
+  _setY(min, max) {
+    if (this.yLog) {
+      min = Math.min(LOG_CEIL / 10, Math.max(LOG_FLOOR, min || LOG_FLOOR));
+      max = Math.min(LOG_CEIL, Math.max(min * 2, max || 0));
+    } else if (!(max > min) || !Number.isFinite(min) || !Number.isFinite(max)) {
+      return;
+    }
+    this.yMin = min;
+    this.yMax = max;
+  }
+
+  _fitY(lo, hi) {
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
+      if (this.yLog) this._setY(this.yMin, this.yMax); // make sure an empty log axis is valid
+      return;
+    }
+    if (this.yLog) {
+      this._setY(10 ** Math.floor(toLog(lo)), 10 ** Math.ceil(toLog(hi)));
+      return;
+    }
+    const span = Math.max(hi - lo, Math.abs(hi) * 0.05, 0.05);
+    const tlo = lo - span * 0.08;
+    const thi = hi + span * 0.08;
+    const fits = this.yMin <= tlo && this.yMax >= thi && thi - tlo > (this.yMax - this.yMin) * 0.45;
+    if (fits) return;
+    const step = fmt.niceStep(thi - tlo, 5);
+    const max = Math.ceil(thi / step) * step;
+    // Current that never goes negative shouldn't get a negative axis, just a little room below zero.
+    const min = lo >= 0 ? Math.max(Math.floor(tlo / step) * step, -0.03 * max) : Math.floor(tlo / step) * step;
+    this._setY(min, max);
+  }
+
+  // ---- rendering ----------------------------------------------------------
+
+  _frame(now) {
+    const version = this.store ? this.store.version : -1;
+    const changed = version !== this._lastVersion;
+    if (!this._dirty && !changed) return;
+    if (!this._dirty && now - this._lastFrame < 33) return;
+    this._lastFrame = now;
+    this._lastVersion = version;
+    this._dirty = false;
+    this.render();
+    this.minimap?.render(now);
+  }
+
+  _ensureColumns(cols) {
+    if (cols <= this._cols) return;
+    this._cols = cols;
+    this._colData = {
+      min: new Float64Array(cols),
+      max: new Float64Array(cols),
+      mean: new Float64Array(cols),
+      or: new Uint8Array(cols),
+      and: new Uint8Array(cols),
+    };
+    this._raw.v = new Float64Array(cols + 2);
+    this._raw.b = new Uint8Array(cols + 2);
+  }
+
+  /** Aggregate (or gather raw samples for) the visible range, unless nothing changed since last time. */
+  _gather(from, to, cols, spp) {
+    const store = this.store;
+    const key = `${store?.version}|${from}|${to}|${cols}`;
+    if (key === this._dataKey) return;
+    this._dataKey = key;
+    this._lo = Infinity;
+    this._hi = -Infinity;
+    if (!store || !store.length) return;
+    if (spp < 1) {
+      const raw = this._raw;
+      raw.from = Math.max(store.start, Math.floor(from));
+      raw.n = 0;
+      for (const seg of store.segments(raw.from, Math.min(store.end, Math.ceil(to) + 1))) {
+        for (let k = 0; k < seg.cur.length; k++) {
+          const v = seg.cur[k];
+          raw.v[raw.n] = v;
+          raw.b[raw.n++] = seg.bits[k];
+          if (v < this._lo) this._lo = v;
+          if (v > this._hi) this._hi = v;
+        }
+      }
+    } else {
+      const { lo, hi } = aggregateColumns(store, from, spp, cols, this._colData, this._agg);
+      this._lo = lo;
+      this._hi = hi;
+    }
+  }
+
+  render() {
+    const ctx = this.ctx;
+    const c = this.colors;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.clearRect(0, 0, this.cssW, this.cssH);
+    ctx.font = c.font;
+    const { plot, digital, bottom, axisY } = this.layout();
+    const [from, to] = this.visibleRange();
+
+    ctx.fillStyle = c.bg;
+    ctx.fillRect(plot.x, plot.y, plot.w, plot.h);
+
+    const cols = Math.max(1, Math.floor(plot.w * this.dpr));
+    const spp = this.viewSpan / cols;
+    this._ensureColumns(cols);
+    this._gather(from, to, cols, spp);
+    if (this.yAuto) this._fitY(this._lo, this._hi);
+
+    // Everything the draw steps need, computed once per frame.
+    const f = {
+      plot,
+      digital,
+      bottom,
+      from,
+      cols,
+      raw: spp < 1,
+      pxPerSample: plot.w / this.viewSpan,
+      ymap: this._yMap(plot),
+      hasData: !!this.store?.length,
+    };
+    f.xOf = (i) => plot.x + (i - from) * f.pxPerSample;
+
+    this._drawYGrid(f);
+    this._drawTimeGrid(f, axisY, from, to);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plot.x, plot.y, plot.w, plot.h);
+    ctx.clip();
+    if (f.hasData) {
+      if (f.raw) this._drawRaw(f);
+      else this._drawBands(f);
+    }
+    if (this.triggerLevel !== null) {
+      const y = Math.round(f.ymap(this.triggerLevel)) + 0.5;
+      ctx.strokeStyle = c.trigger;
+      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(plot.x, y);
+      ctx.lineTo(plot.x + plot.w, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+
+    if (digital.lanes) this._drawDigital(f);
+    this._drawOverlays(f);
+    this._drawHover(f);
+  }
+
+  _drawYGrid({ plot, ymap }) {
+    const ctx = this.ctx;
+    const c = this.colors;
+    ctx.fillStyle = c.axis;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    let values;
+    let label;
+    if (this.yLog) {
+      values = [];
+      for (let v = 10 ** Math.floor(toLog(this.yMin)); v <= this.yMax * 1.0001; v *= 10) values.push(v);
+      label = (v) => fmt.current(v, 1);
+    } else {
+      const t = fmt.ticks(this.yMin, this.yMax, Math.max(2, Math.round(plot.h / 48)));
+      values = t.values;
+      const [scale, prefix] = fmt.prefixFor(Math.max(Math.abs(this.yMin), Math.abs(this.yMax)) * 1e-6);
+      label = (v) => fmt.tickLabel(v * 1e-6, t.step * 1e-6, 'A', scale, prefix);
+    }
+    for (const v of values) {
+      const y = Math.round(ymap(v)) + 0.5;
+      if (y < plot.y - 1 || y > plot.y + plot.h + 1) continue;
+      ctx.beginPath();
+      ctx.moveTo(plot.x, y);
+      ctx.lineTo(plot.x + plot.w, y);
+      ctx.stroke();
+      ctx.fillText(label(v), plot.x - 8, y);
+    }
+  }
+
+  _drawTimeGrid({ plot, bottom }, axisY, from, to) {
+    const ctx = this.ctx;
+    const t0 = this._time(from);
+    const t1 = this._time(to);
+    const t = fmt.ticks(t0, t1, Math.max(2, Math.round(plot.w / 110)));
+    ctx.strokeStyle = this.colors.grid;
+    ctx.fillStyle = this.colors.axis;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (const v of t.values) {
+      const x = Math.round(plot.x + ((v - t0) / (t1 - t0)) * plot.w) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, plot.y);
+      ctx.lineTo(x, plot.y + plot.h);
+      ctx.stroke();
+      const label = fmt.timeLabel(v, t.step);
+      const half = ctx.measureText(label).width / 2;
+      if (x - half >= 0 && x + half <= this.cssW) ctx.fillText(label, x, axisY + 8);
+    }
+    ctx.beginPath();
+    ctx.moveTo(plot.x, bottom + 0.5);
+    ctx.lineTo(plot.x + plot.w, bottom + 0.5);
+    ctx.stroke();
+  }
+
+  _time(index) {
+    return this.store ? this.store.timeOf(index) : index / this.rate;
+  }
+
+  _drawBands({ plot, ymap, cols }) {
+    const ctx = this.ctx;
+    const { min, max } = this._colData;
+    const w = 1 / this.dpr;
+    ctx.fillStyle = this.colors.trace;
+    ctx.beginPath();
+    let prevMin = NaN;
+    let prevMax = NaN;
+    for (let k = 0; k < cols; k++) {
+      let mn = min[k];
+      let mx = max[k];
+      if (mn !== mn) {
+        prevMin = prevMax = NaN;
+        continue;
+      }
+      // Join each column to its neighbour so steps stay connected.
+      if (prevMax === prevMax) {
+        if (prevMax < mn) mn = prevMax;
+        if (prevMin > mx) mx = prevMin;
+      }
+      prevMin = min[k];
+      prevMax = max[k];
+      const y1 = ymap(mx);
+      ctx.rect(plot.x + k * w, y1, w, Math.max(w, ymap(mn) - y1));
+    }
+    ctx.fill();
+  }
+
+  _drawRaw({ ymap, xOf, pxPerSample }) {
+    const ctx = this.ctx;
+    const { v, from, n } = this._raw;
+    const dots = pxPerSample > 7;
+    ctx.strokeStyle = this.colors.trace;
+    ctx.lineWidth = 1.25;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    let pen = false;
+    for (let k = 0; k < n; k++) {
+      if (v[k] !== v[k]) {
+        pen = false;
+        continue;
+      }
+      const x = xOf(from + k);
+      const y = ymap(v[k]);
+      if (pen) ctx.lineTo(x, y);
+      else ctx.moveTo(x, y);
+      pen = true;
+    }
+    ctx.stroke();
+    if (!dots) return;
+    ctx.fillStyle = this.colors.trace;
+    ctx.beginPath();
+    for (let k = 0; k < n; k++) {
+      if (v[k] !== v[k]) continue;
+      const x = xOf(from + k);
+      const y = ymap(v[k]);
+      ctx.moveTo(x + 2.5, y);
+      ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
+
+  _drawDigital({ digital: d, raw, cols, xOf, hasData }) {
+    const ctx = this.ctx;
+    const c = this.colors;
+    const w = 1 / this.dpr;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    let lane = 0;
+    for (let ch = 0; ch < 8; ch++) {
+      if (!(this.channels & (1 << ch))) continue;
+      const top = d.y + lane++ * LANE_H;
+      const hiY = top + 3;
+      const loY = top + LANE_H - 4;
+      ctx.fillStyle = c.laneBg;
+      ctx.fillRect(d.x, top + 1, d.w, LANE_H - 2);
+      ctx.fillStyle = c.axis;
+      ctx.fillText(`D${ch}`, d.x - 8, top + LANE_H / 2);
+      if (!hasData) continue;
+      ctx.fillStyle = c.digital;
+      const mask = 1 << ch;
+
+      // Runs of equal state are drawn as one rectangle. State: 0 low, 1 high, 2 toggling within a column.
+      let runX = 0;
+      let runState = -1;
+      let endX = 0;
+      const flush = (x) => {
+        if (runState === 1) ctx.fillRect(runX, hiY, x - runX, loY - hiY);
+        else if (runState === 0) ctx.fillRect(runX, loY - 1, x - runX, 1.5);
+        else if (runState === 2) {
+          ctx.globalAlpha = 0.45;
+          ctx.fillRect(runX, hiY, x - runX, loY - hiY);
+          ctx.globalAlpha = 1;
+        }
+      };
+      const step = (x0, x1, state) => {
+        if (state !== runState) {
+          flush(x0);
+          runX = x0;
+          runState = state;
+        }
+        endX = x1;
+      };
+
+      if (raw) {
+        const { b, from, n } = this._raw;
+        for (let k = 0; k < n; k++) {
+          const x0 = Math.max(d.x, xOf(from + k));
+          const x1 = Math.min(d.x + d.w, xOf(from + k + 1));
+          if (x1 > x0) step(x0, x1, b[k] & mask ? 1 : 0);
+        }
+      } else {
+        const { mean, or, and } = this._colData;
+        for (let k = 0; k < cols; k++) {
+          const x0 = d.x + k * w;
+          if (mean[k] !== mean[k] && !or[k] && !and[k]) {
+            // No samples here (outside the buffer, or lost).
+            flush(x0);
+            runState = -1;
+            continue;
+          }
+          step(x0, x0 + w, and[k] & mask ? 1 : or[k] & mask ? 2 : 0);
+        }
+      }
+      flush(endX);
+    }
+  }
+
+  _drawOverlays({ plot, bottom, xOf }) {
+    const ctx = this.ctx;
+    const c = this.colors;
+    const right = plot.x + plot.w;
+    if (this.selection) {
+      const xa = xOf(this.selection.a);
+      const xb = xOf(this.selection.b);
+      if (xb > plot.x && xa < right) {
+        const x0 = Math.max(plot.x, xa);
+        ctx.fillStyle = c.selectFill;
+        ctx.fillRect(x0, plot.y, Math.max(1, Math.min(right, xb) - x0), bottom - plot.y);
+        ctx.strokeStyle = c.select;
+        ctx.lineWidth = 1.5;
+        for (const x of [xa, xb]) {
+          if (x < plot.x || x > right) continue;
+          ctx.beginPath();
+          ctx.moveTo(x, plot.y);
+          ctx.lineTo(x, bottom);
+          ctx.stroke();
+        }
+      }
+    }
+    if (this.triggerMarker !== null) {
+      const x = xOf(this.triggerMarker);
+      if (x >= plot.x && x <= right) {
+        ctx.strokeStyle = c.trigger;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, plot.y);
+        ctx.lineTo(x + 0.5, bottom);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = c.trigger;
+        ctx.beginPath();
+        ctx.moveTo(x - 5, plot.y);
+        ctx.lineTo(x + 5, plot.y);
+        ctx.lineTo(x, plot.y + 7);
+        ctx.fill();
+      }
+    }
+  }
+
+  _drawHover({ plot, bottom, ymap, raw, cols, from, pxPerSample, hasData }) {
+    const h = this.hover;
+    if (!h || this._drag || !hasData) return;
+    if (h.x < plot.x || h.x > plot.x + plot.w) return;
+    const ctx = this.ctx;
+    const c = this.colors;
+    const idx = from + (h.x - plot.x) / pxPerSample;
+    let text;
+    let value;
+    if (raw) {
+      value = this.store.valueAt(Math.round(idx));
+      if (value !== value) return;
+      text = fmt.current(value);
+    } else {
+      const { min, max, mean } = this._colData;
+      const k = Math.min(cols - 1, Math.max(0, Math.floor((h.x - plot.x) * this.dpr)));
+      value = mean[k];
+      if (value !== value) return;
+      text =
+        max[k] - min[k] > Math.abs(value) * 0.02
+          ? `${fmt.current(min[k], 3)} … ${fmt.current(max[k], 3)}`
+          : fmt.current(value);
+    }
+    const t = fmt.duration(this._time(raw ? Math.round(idx) : idx), 6);
+    ctx.strokeStyle = c.cursor;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(h.x) + 0.5, plot.y);
+    ctx.lineTo(Math.round(h.x) + 0.5, bottom);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = c.trace;
+    ctx.beginPath();
+    ctx.arc(h.x, ymap(value), 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    const label = `${text}   ${t}`;
+    const tw = ctx.measureText(label).width + 16;
+    let bx = h.x + 10;
+    if (bx + tw > plot.x + plot.w) bx = h.x - 10 - tw;
+    const by = plot.y + 6;
+    ctx.fillStyle = c.bg;
+    ctx.globalAlpha = 0.92;
+    ctx.fillRect(bx, by, tw, 22);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = c.grid;
+    ctx.strokeRect(bx + 0.5, by + 0.5, tw - 1, 21);
+    ctx.fillStyle = c.cursor;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, bx + 8, by + 11);
+  }
+
+  // ---- input --------------------------------------------------------------
+
+  _bindInput() {
+    const el = this.canvas;
+    const pos = (e) => {
+      const r = el.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    };
+
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      const p = pos(e);
+      const { plot } = this.layout();
+      el.setPointerCapture(e.pointerId);
+      el.focus({ preventScroll: true });
+      if (p.x < plot.x) {
+        this.yAuto = false;
+        this._drag = { kind: 'y', y: p.y, domain: this._yDomain(), plot };
+        return;
+      }
+      if ((this.tool === 'select') !== e.shiftKey) {
+        const i = this._clampIndex(this.indexAtX(p.x));
+        this._drag = { kind: 'select', anchor: i, x: p.x };
+        this.selection = { a: i, b: i };
+      } else {
+        this.viewStart = this.visibleRange()[0];
+        this.live = false;
+        this._drag = { kind: 'pan', x: p.x, start: this.viewStart, plot };
+        this.onviewchange?.();
+      }
+      this.invalidate();
+    });
+
+    el.addEventListener('pointermove', (e) => {
+      const p = pos(e);
+      this.hover = p;
+      const d = this._drag;
+      if (d?.kind === 'pan') {
+        this.viewStart = d.start - ((p.x - d.x) / d.plot.w) * this.viewSpan;
+        this._clampView();
+        this.onviewchange?.();
+      } else if (d?.kind === 'select') {
+        const i = this._clampIndex(this.indexAtX(p.x));
+        this.selection = { a: Math.min(d.anchor, i), b: Math.max(d.anchor, i) };
+        this.onselect?.(this.selection);
+      } else if (d?.kind === 'y') {
+        // Shift the axis in its own units (log10 µA in log mode).
+        const [lo, hi] = d.domain;
+        const shift = ((p.y - d.y) / d.plot.h) * (hi - lo);
+        const back = this.yLog ? (u) => 10 ** u : (u) => u;
+        this._setY(back(lo + shift), back(hi + shift));
+      }
+      this.invalidate();
+    });
+
+    const end = (e) => {
+      const d = this._drag;
+      this._drag = null;
+      if (d?.kind === 'select') {
+        if (Math.abs(pos(e).x - d.x) < 3) this.clearSelection();
+        else this.onselect?.(this.selection);
+      }
+      this.invalidate();
+    };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+    el.addEventListener('pointerleave', () => {
+      this.hover = null;
+      this.invalidate();
+    });
+
+    el.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        const p = pos(e);
+        const { plot } = this.layout();
+        const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+        const dy = e.deltaY * unit;
+        const dx = e.deltaX * unit;
+        if (p.x < plot.x) this._zoomY(Math.exp(dy * 0.002), (plot.y + plot.h - p.y) / plot.h);
+        else if (Math.abs(dx) > Math.abs(dy)) this.pan(dx / plot.w);
+        else this.zoom(Math.exp(dy * 0.002), (p.x - plot.x) / plot.w);
+        this.invalidate();
+      },
+      { passive: false },
+    );
+
+    el.addEventListener('dblclick', (e) => {
+      if (pos(e).x < this.layout().plot.x) this.yAuto = true;
+      else this.clearSelection();
+      this.invalidate();
+    });
+
+    el.addEventListener('keydown', (e) => {
+      const keys = {
+        ArrowLeft: () => this.pan(-0.15),
+        ArrowRight: () => this.pan(0.15),
+        '+': () => this.zoom(0.5),
+        '=': () => this.zoom(0.5),
+        '-': () => this.zoom(2),
+        Escape: () => this.clearSelection(),
+        l: () => this.setLive(true),
+        f: () => this.fitAll(),
+      };
+      const fn = keys[e.key];
+      if (fn) {
+        e.preventDefault();
+        fn();
+      }
+    });
+  }
+
+  /** Zoom the current axis around the point `frac` of the way up the plot. */
+  _zoomY(factor, frac) {
+    this.yAuto = false;
+    const [lo, hi] = this._yDomain();
+    const a = lo + frac * (hi - lo);
+    const back = this.yLog ? (u) => 10 ** u : (u) => u;
+    this._setY(back(a - (a - lo) * factor), back(a + (hi - a) * factor));
+  }
+
+  _clampIndex(i) {
+    return Math.min(this.dataEnd, Math.max(this.dataStart, Math.round(i)));
+  }
+}
+
+/** Overview of the whole buffer with the visible window marked; click or drag to navigate. */
+export class Minimap {
+  constructor(canvas, chart) {
+    this.canvas = canvas;
+    this.chart = chart;
+    this.ctx = canvas.getContext('2d');
+    this.cache = document.createElement('canvas');
+    this.cacheVersion = -1;
+    this.cacheTime = 0;
+    this.cacheKey = '';
+    this.cols = { min: new Float64Array(0), max: new Float64Array(0) };
+    chart.minimap = this;
+    new ResizeObserver(() => {
+      fitCanvas(canvas);
+      chart.invalidate();
+    }).observe(canvas);
+
+    let dragging = false;
+    const go = (e) => {
+      const store = chart.store;
+      if (!store || !store.length) return;
+      const r = canvas.getBoundingClientRect();
+      const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+      const i = store.start + frac * store.length;
+      chart.setView(i - chart.viewSpan / 2, i + chart.viewSpan / 2);
+    };
+    canvas.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      canvas.setPointerCapture(e.pointerId);
+      go(e);
+    });
+    canvas.addEventListener('pointermove', (e) => dragging && go(e));
+    canvas.addEventListener('pointerup', () => (dragging = false));
+    canvas.addEventListener('pointercancel', () => (dragging = false));
+  }
+
+  render(now) {
+    const store = this.chart.store;
+    const { width: W, height: H } = this.canvas;
+    const ctx = this.ctx;
+    const c = this.chart.colors;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = c.laneBg;
+    ctx.fillRect(0, 0, W, H);
+    if (!store || store.length < 2) return;
+
+    const key = `${W}x${H}:${this.chart.yLog}:${c.trace}`;
+    if (key !== this.cacheKey || (store.version !== this.cacheVersion && now - this.cacheTime > 300)) {
+      this._redraw(store, W, H);
+      this.cacheKey = key;
+      this.cacheVersion = store.version;
+      this.cacheTime = now;
+    }
+    ctx.drawImage(this.cache, 0, 0);
+
+    const [from, to] = this.chart.visibleRange();
+    const x0 = ((from - this.span0) / this.spanLen) * W;
+    const x1 = ((to - this.span0) / this.spanLen) * W;
+    ctx.fillStyle = c.selectFill;
+    ctx.strokeStyle = c.select;
+    ctx.lineWidth = Math.max(1, (window.devicePixelRatio || 1) * 1.25);
+    const a = Math.max(0, x0);
+    const b = Math.min(W, Math.max(a + 2, x1));
+    ctx.fillRect(a, 0, b - a, H);
+    ctx.strokeRect(a + 0.5, 0.5, b - a - 1, H - 1);
+  }
+
+  _redraw(store, W, H) {
+    const cache = this.cache;
+    if (cache.width !== W || cache.height !== H) {
+      cache.width = W;
+      cache.height = H;
+    }
+    if (this.cols.min.length !== W) this.cols = { min: new Float64Array(W), max: new Float64Array(W) };
+    const ctx = cache.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+    this.span0 = store.start;
+    this.spanLen = store.length;
+    const { min, max } = this.cols;
+    const { lo, hi } = aggregateColumns(store, store.start, store.length / W, W, this.cols);
+    if (!Number.isFinite(lo)) return;
+    const f = this.chart.yLog ? toLog : (v) => v;
+    const flo = f(lo);
+    const fhi = f(hi) === flo ? flo + 1 : f(hi);
+    const pad = H * 0.12;
+    const y = (v) => H - pad - ((f(v) - flo) / (fhi - flo)) * (H - 2 * pad);
+    ctx.fillStyle = this.chart.colors.trace;
+    ctx.globalAlpha = 0.75;
+    ctx.beginPath();
+    for (let k = 0; k < W; k++) {
+      if (min[k] !== min[k]) continue;
+      const y1 = y(max[k]);
+      ctx.rect(k, y1, 1, Math.max(1, y(min[k]) - y1));
+    }
+    ctx.fill();
+  }
+}

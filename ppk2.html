@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ppk2.html Power Profiler</title>
+    <meta name="description" content="Measure and record current with a Nordic Power Profiler Kit II directly from the browser over Web Serial." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230b5cad'/%3E%3Cpath d='M4 22h6l3-12 4 16 3-10 2 6h6' fill='none' stroke='white' stroke-width='2.4' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="css/app.css" />
+    <script type="module" src="js/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 21h6l3-12 4 16 3-10 2 6h8" /></svg>
+        <span class="brand-name">ppk2.html</span>
+        <span class="brand-sub">Power profiler for the Nordic PPK2</span>
+      </div>
+      <div class="conn" id="conn" data-state="off">
+        <span class="conn-dot" aria-hidden="true"></span>
+        <span id="conn-text">Not connected</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="side" aria-label="Controls">
+        <section class="panel" id="sec-device">
+          <h2>Device</h2>
+          <p class="notice" id="unsupported" hidden>
+            This browser can't talk to USB serial devices. Open the page in Chrome or Edge on a desktop computer to
+            connect a PPK2. The simulated device still works.
+          </p>
+          <div class="stack" data-when="disconnected">
+            <button class="btn primary" id="btn-connect" type="button">Connect PPK2</button>
+            <button class="btn" id="btn-demo" type="button">Use simulated device</button>
+          </div>
+          <div class="stack" data-when="connected" hidden>
+            <dl class="facts" id="device-facts"></dl>
+            <p class="notice" id="uncalibrated" hidden>
+              This PPK2 didn't send its calibration data, so generic values are used and readings may be off. Unplug
+              it, plug it back in and connect again.
+            </p>
+            <button class="btn" id="btn-disconnect" type="button">Disconnect</button>
+          </div>
+        </section>
+
+        <section class="panel" id="sec-power" data-needs="device">
+          <h2>Power</h2>
+          <div class="seg" role="radiogroup" aria-label="Measurement mode" id="mode">
+            <button type="button" role="radio" data-value="2">Source meter</button>
+            <button type="button" role="radio" data-value="1">Ammeter</button>
+          </div>
+          <p class="hint" id="mode-hint"></p>
+          <div class="field" id="vdd-field">
+            <div class="field-row">
+              <label for="vdd-num">Supply voltage</label>
+              <span class="num-unit"><input id="vdd-num" type="number" min="800" max="5000" step="10" /> mV</span>
+            </div>
+            <input id="vdd" type="range" min="800" max="5000" step="10" aria-label="Supply voltage" />
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="dut-power" />
+            <span class="toggle-track" aria-hidden="true"></span>
+            <span>Enable power output</span>
+          </label>
+        </section>
+
+        <section class="panel" id="sec-sampling" data-needs="device">
+          <h2>Sampling</h2>
+          <div class="field-row">
+            <label for="rate">Sample rate</label>
+            <select id="rate"></select>
+          </div>
+          <div class="field-row">
+            <label for="limit">Stop after</label>
+            <span class="num-unit"><input id="limit" type="number" min="0" step="any" placeholder="no limit" /> s</span>
+          </div>
+          <button class="btn primary big" id="btn-start" type="button">Start</button>
+          <p class="hint" id="buffer-hint"></p>
+        </section>
+
+        <details class="panel" id="sec-trigger">
+          <summary><h2>Trigger</h2><span class="summary-state" id="trig-summary">Off</span></summary>
+          <label class="toggle">
+            <input type="checkbox" id="trig-on" />
+            <span class="toggle-track" aria-hidden="true"></span>
+            <span>Wait for a trigger before showing data</span>
+          </label>
+          <div class="field-row">
+            <label for="trig-level">Level</label>
+            <span class="num-unit">
+              <input id="trig-level" type="number" step="any" />
+              <select id="trig-unit" aria-label="Level unit">
+                <option value="1">µA</option>
+                <option value="1000">mA</option>
+              </select>
+            </span>
+          </div>
+          <div class="seg" role="radiogroup" aria-label="Edge" id="trig-edge">
+            <button type="button" role="radio" data-value="rising">Rising edge</button>
+            <button type="button" role="radio" data-value="falling">Falling edge</button>
+          </div>
+          <div class="field-row">
+            <label for="trig-window">Capture length</label>
+            <span class="num-unit"><input id="trig-window" type="number" min="0.01" step="any" /> ms</span>
+          </div>
+          <div class="field-row">
+            <label for="trig-pre">Before trigger</label>
+            <span class="num-unit"><input id="trig-pre" type="number" min="0" max="90" step="1" /> %</span>
+          </div>
+          <div class="seg" role="radiogroup" aria-label="Trigger mode" id="trig-mode">
+            <button type="button" role="radio" data-value="single">Single</button>
+            <button type="button" role="radio" data-value="continuous">Continuous</button>
+          </div>
+          <p class="hint" id="trig-status"></p>
+        </details>
+
+        <details class="panel" id="sec-display" open>
+          <summary><h2>Display</h2></summary>
+          <div class="seg" role="radiogroup" aria-label="Current axis" id="yscale">
+            <button type="button" role="radio" data-value="linear">Linear</button>
+            <button type="button" role="radio" data-value="log">Logarithmic</button>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="show-digital" />
+            <span class="toggle-track" aria-hidden="true"></span>
+            <span>Digital channels</span>
+          </label>
+          <div class="chips" id="channels" aria-label="Visible digital channels"></div>
+        </details>
+
+        <details class="panel" id="sec-files">
+          <summary><h2>Files</h2></summary>
+          <div class="stack">
+            <button class="btn" id="btn-save" type="button">Save recording</button>
+            <button class="btn" id="btn-open" type="button">Open recording</button>
+            <input type="file" id="file-open" accept=".wppk2" hidden />
+            <button class="btn" id="btn-csv-sel" type="button">Export selection as CSV</button>
+            <button class="btn" id="btn-csv-all" type="button">Export everything as CSV</button>
+            <label class="check"><input type="checkbox" id="csv-digital" /> Include digital channels in CSV</label>
+            <button class="btn" id="btn-png" type="button">Save chart as image</button>
+          </div>
+        </details>
+
+        <details class="panel" id="sec-advanced">
+          <summary><h2>Advanced</h2></summary>
+          <div class="field-row">
+            <label for="buffer">Memory for recording</label>
+            <select id="buffer">
+              <option value="268435456">256 MB</option>
+              <option value="536870912">512 MB</option>
+              <option value="1073741824">1 GB</option>
+              <option value="2147483648">2 GB</option>
+              <option value="4294967296">4 GB</option>
+            </select>
+          </div>
+          <h3>Spike filter</h3>
+          <p class="hint">Smooths the glitch the PPK2 produces when it switches measurement range.</p>
+          <div class="field-row">
+            <label for="spike-samples">Samples to smooth</label>
+            <input id="spike-samples" type="number" min="1" max="10" step="1" />
+          </div>
+          <div class="field-row">
+            <label for="spike-alpha">Coefficient</label>
+            <input id="spike-alpha" type="number" min="0.01" max="1" step="0.01" />
+          </div>
+          <div class="field-row">
+            <label for="spike-alpha5">Coefficient, highest range</label>
+            <input id="spike-alpha5" type="number" min="0.01" max="1" step="0.01" />
+          </div>
+          <button class="btn small" id="btn-spike-reset" type="button">Restore defaults</button>
+
+          <h3>Range gains</h3>
+          <p class="hint">Fine-tune each measurement range. Values are stored on the PPK2.</p>
+          <div class="gains" id="gains" data-needs="device"></div>
+
+          <details class="calib">
+            <summary>Calibration data</summary>
+            <div id="calib-table" class="calib-table"><p class="hint">Connect a device to see its calibration.</p></div>
+          </details>
+        </details>
+      </aside>
+
+      <main class="main">
+        <section class="readouts" aria-label="Measurements">
+          <div class="meter" id="meter" data-state="idle">
+            <div class="meter-label" id="meter-label">Live average</div>
+            <div class="meter-value"><span id="meter-num">—</span><span id="meter-unit">A</span></div>
+            <div class="meter-sub" id="meter-sub">Connect a PPK2 and press Start</div>
+          </div>
+          <div class="stats">
+            <div class="stats-head">Visible window</div>
+            <dl id="stats-window"></dl>
+          </div>
+          <div class="stats" id="stats-sel-wrap">
+            <div class="stats-head">Selection</div>
+            <dl id="stats-sel"></dl>
+            <p class="stats-empty" id="stats-sel-empty">Hold Shift and drag across the chart, or switch to Select.</p>
+          </div>
+        </section>
+
+        <div class="toolbar" role="toolbar" aria-label="Chart">
+          <div class="seg compact" role="radiogroup" aria-label="Drag action" id="tool">
+            <button type="button" role="radio" data-value="pan" title="Drag to move along time">Pan</button>
+            <button type="button" role="radio" data-value="select" title="Drag to measure a time range">Select</button>
+          </div>
+          <div class="tool-group">
+            <button class="icon-btn" id="btn-zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">
+              <svg viewBox="0 0 20 20"><path d="M10 5v10M5 10h10" /></svg>
+            </button>
+            <button class="icon-btn" id="btn-zoom-out" type="button" title="Zoom out (−)" aria-label="Zoom out">
+              <svg viewBox="0 0 20 20"><path d="M5 10h10" /></svg>
+            </button>
+            <select id="span" aria-label="Window length" title="Window length"></select>
+            <button class="btn small" id="btn-fit" type="button" title="Show the whole recording (F)">Show all</button>
+            <button class="btn small live-btn" id="btn-live" type="button" title="Follow the newest data (L)">Follow live</button>
+          </div>
+          <div class="tool-status" id="tool-status"></div>
+        </div>
+
+        <div class="chart-wrap">
+          <canvas id="chart" tabindex="0" aria-label="Current over time. Scroll to zoom, drag to pan, Shift-drag to select."></canvas>
+          <div class="chart-empty" id="chart-empty">
+            <p>Connect a PPK2, or try the simulated device, then press Start.</p>
+          </div>
+        </div>
+        <canvas id="minimap" aria-label="Overview of the whole recording. Click to jump."></canvas>
+        <ul class="help">
+          <li><kbd>Scroll</kbd> zooms time</li>
+          <li><kbd>Drag</kbd> pans</li>
+          <li><kbd>Shift</kbd>+<kbd>drag</kbd> selects</li>
+          <li><kbd>Double-click</kbd> clears the selection</li>
+          <li>Scroll or drag the current axis to rescale it; double-click it to fit</li>
+        </ul>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>
