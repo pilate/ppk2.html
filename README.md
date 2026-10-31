@@ -8,9 +8,12 @@ Not affiliated with or endorsed by Nordic Semiconductor.
 
 ## Use it
 
-Build the single-file app, then open it in a desktop browser. Connecting a PPK2 needs Web Serial: Chrome and
-Edge have it, and recent Firefox versions expose it too. Without it you can still open, view, save and export
-recordings, and use the simulated device.
+Open **https://pilate.github.io/ppk2.html/** in a desktop browser
+([try it with a simulated PPK2](https://pilate.github.io/ppk2.html/?demo)). Connecting a PPK2 needs Web Serial:
+Chrome and Edge have it, and recent Firefox versions expose it too. Without it you can still open, view, save and
+export recordings, and use the simulated device.
+
+To get the app as a single file, download it from that page with your browser's *Save page as*, or build it:
 
 ```sh
 python3 build.py          # writes dist/ppk2.html
@@ -37,6 +40,9 @@ python3 -m http.server 8000
 
 On WSL, run the server inside WSL and open the page in Chrome or Edge on Windows; the PPK2 stays attached to
 Windows, where the browser can see it. Run `python3 build.py` again to refresh `dist/ppk2.html` after changes.
+
+Every push to `main` runs the tests, builds `dist/ppk2.html` and publishes it to GitHub Pages
+(`.github/workflows/pages.yml`).
 
 ## Features
 
