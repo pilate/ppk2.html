@@ -6,10 +6,11 @@ import { Agg } from './store.js';
 
 const AXIS_W = 76;
 const RIGHT_PAD = 16;
-const TOP_PAD = 12;
-const TIME_AXIS_H = 28;
+const TIME_AXIS_H = 30; // time labels, above the plot
+const BOTTOM_PAD = 10; // below the plot when there are no digital lanes (room for its lowest label)
 const LANE_H = 18;
-const LANE_GAP = 10;
+const LANE_GAP = 22; // between the current plot and the digital band; room for the lowest axis label
+const BAND_PAD = 6; // digital band padding above the first lane and below the last
 const LOG_FLOOR = 1e-3; // µA (1 nA)
 const LOG_CEIL = 1e8; // µA (100 A)
 const MIN_SPAN = 10; // samples
@@ -180,6 +181,7 @@ export class Chart {
       trigger: cssVar(el, '--trigger', '#b3261e'),
       digital: cssVar(el, '--digital', '#2f7d5b'),
       laneBg: cssVar(el, '--lane-bg', '#f3f6f7'),
+      rule: cssVar(el, '--rule', '#cdd5da'),
       cursor: cssVar(el, '--cursor', '#1a2126'),
       font: cssVar(el, '--chart-font', '12px sans-serif'),
     };
@@ -303,16 +305,17 @@ export class Chart {
 
   layout() {
     const lanes = this.showDigital ? popcount(this.channels) : 0;
-    const digitalH = lanes ? lanes * LANE_H + LANE_GAP : 0;
+    // The digital band, when shown, runs to the bottom edge of the chart.
+    const below = lanes ? LANE_GAP + lanes * LANE_H + BAND_PAD : BOTTOM_PAD;
     const plot = {
       x: AXIS_W,
-      y: TOP_PAD,
+      y: TIME_AXIS_H,
       w: Math.max(10, this.cssW - AXIS_W - RIGHT_PAD),
-      h: Math.max(40, this.cssH - TOP_PAD - TIME_AXIS_H - digitalH),
+      h: Math.max(40, this.cssH - TIME_AXIS_H - below),
     };
     const digital = { x: plot.x, y: plot.y + plot.h + LANE_GAP, w: plot.w, h: lanes * LANE_H, lanes };
-    const bottom = lanes ? digital.y + digital.h : plot.y + plot.h;
-    return { plot, digital, bottom, axisY: this.cssH - TIME_AXIS_H };
+    const bottom = lanes ? digital.y + digital.h + BAND_PAD : plot.y + plot.h;
+    return { plot, digital, bottom };
   }
 
   indexAtX(x) {
@@ -458,7 +461,7 @@ export class Chart {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.cssW, this.cssH);
     ctx.font = c.font;
-    const { plot, digital, bottom, axisY } = this.layout();
+    const { plot, digital, bottom } = this.layout();
     const [from, to] = this.visibleRange();
 
     ctx.fillStyle = c.bg;
@@ -486,8 +489,16 @@ export class Chart {
     };
     f.xOf = (i) => plot.x + (i - from) * f.pxPerSample;
 
+    // The digital channels sit on their own full-width band, ruled off from the current plot.
+    if (digital.lanes) {
+      const bandTop = digital.y - BAND_PAD;
+      ctx.fillStyle = c.laneBg;
+      ctx.fillRect(0, bandTop, this.cssW, bottom - bandTop);
+      ctx.fillStyle = c.rule;
+      ctx.fillRect(0, bandTop, this.cssW, 1);
+    }
     this._drawYGrid(f);
-    this._drawTimeGrid(f, axisY, from, to);
+    this._drawTimeGrid(f, from, to);
 
     ctx.save();
     ctx.beginPath();
@@ -546,7 +557,8 @@ export class Chart {
     }
   }
 
-  _drawTimeGrid({ plot, bottom }, axisY, from, to) {
+  /** Vertical time gridlines through the plot and digital band, labelled above the plot. */
+  _drawTimeGrid({ plot, digital, bottom }, from, to) {
     const ctx = this.ctx;
     const t0 = this._time(from);
     const t1 = this._time(to);
@@ -554,21 +566,23 @@ export class Chart {
     ctx.strokeStyle = this.colors.grid;
     ctx.fillStyle = this.colors.axis;
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
+    ctx.textBaseline = 'middle';
     for (const v of t.values) {
       const x = Math.round(plot.x + ((v - t0) / (t1 - t0)) * plot.w) + 0.5;
       ctx.beginPath();
       ctx.moveTo(x, plot.y);
       ctx.lineTo(x, plot.y + plot.h);
+      if (digital.lanes) {
+        ctx.moveTo(x, digital.y - BAND_PAD);
+        ctx.lineTo(x, bottom);
+      }
       ctx.stroke();
       const label = fmt.timeLabel(v, t.step);
       const half = ctx.measureText(label).width / 2;
-      if (x - half >= 0 && x + half <= this.cssW) ctx.fillText(label, x, axisY + 8);
+      if (x - half >= 0 && x + half <= this.cssW) ctx.fillText(label, x, TIME_AXIS_H / 2);
     }
-    ctx.beginPath();
-    ctx.moveTo(plot.x, bottom + 0.5);
-    ctx.lineTo(plot.x + plot.w, bottom + 0.5);
-    ctx.stroke();
+    ctx.fillStyle = this.colors.rule;
+    ctx.fillRect(plot.x, plot.y, plot.w, 1);
   }
 
   _time(index) {
@@ -644,11 +658,13 @@ export class Chart {
     let lane = 0;
     for (let ch = 0; ch < DIGITAL_CHANNELS; ch++) {
       if (!(this.channels & (1 << ch))) continue;
-      const top = d.y + lane++ * LANE_H;
+      const top = d.y + lane * LANE_H;
       const hiY = top + 3;
       const loY = top + LANE_H - 4;
-      ctx.fillStyle = c.laneBg;
-      ctx.fillRect(d.x, top + 1, d.w, LANE_H - 2);
+      if (lane++) {
+        ctx.fillStyle = c.grid;
+        ctx.fillRect(d.x, top, d.w, 1);
+      }
       ctx.fillStyle = c.axis;
       ctx.fillText(`D${ch}`, d.x - 8, top + LANE_H / 2);
       if (!hasData) continue;
