@@ -263,3 +263,34 @@ test('appendBlock builds the same summaries as append', () => {
     assert.deepEqual([y.min, y.max, y.sum, y.cnt, y.or, y.and], [x.min, x.max, x.sum, x.cnt, x.or, x.and], `[${a}, ${b})`);
   }
 });
+
+test('BinCache stays exact while reusing bins across updates', async () => {
+  const { BinCache } = await import('../js/chart.js');
+  const check = (cache, store) => {
+    const { first, count, spp, min, max, mean } = cache.bins;
+    for (let k = 0; k < count; k++) {
+      const agg = store.aggregate((first + k) * spp, (first + k + 1) * spp);
+      assert.equal(min[k], agg.validMin, `bin ${first + k} min`);
+      assert.equal(max[k], agg.validMax, `bin ${first + k} max`);
+      assert.ok(Object.is(mean[k], agg.mean), `bin ${first + k} mean`);
+    }
+  };
+  const store = new SampleStore(1000, 0);
+  const overview = new BinCache(); // like the overview: whole recording, power-of-two buckets
+  const columns = new BinCache(); // like the chart: a scrolling window, fractional bin size
+  const spp = 7.3;
+  const update = () => {
+    let size = 1;
+    while (store.length / size > 100) size *= 2;
+    overview.update(store, 0, Math.floor((store.end - 1) / size) + 1, size);
+    columns.update(store, Math.floor(Math.max(0, store.end - 300) / spp), 44, spp);
+  };
+  for (let i = 0; i < 20_000; i++) {
+    store.append(i % 997 === 0 ? NaN : Math.sin(i * 0.37) * 100 + (i % 1500 === 0 ? 500 : 0), 0);
+    if (i % 37 === 0) update(); // irregular updates, like frames
+  }
+  update();
+  check(overview, store);
+  check(columns, store);
+  assert.ok(overview.bins.spp > 1 && overview.bins.count <= 101);
+});

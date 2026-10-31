@@ -35,36 +35,7 @@ function fitCanvas(canvas) {
 
 const toLog = (v) => Math.log10(Math.max(LOG_FLOOR, v));
 
-/**
- * Summarise `n` equal columns starting at sample `from` into `out` arrays
- * (min and max required; mean, or, and optional). Returns the overall { lo, hi }.
- */
-function aggregateColumns(store, from, perCol, n, out, agg = new Agg()) {
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (let k = 0; k < n; k++) {
-    const a = from + k * perCol;
-    store.aggregate(a, a + perCol, agg.reset());
-    out.min[k] = agg.validMin;
-    out.max[k] = agg.validMax;
-    if (out.mean) {
-      out.mean[k] = agg.mean;
-      out.or[k] = agg.n ? agg.or : 0;
-      out.and[k] = agg.n ? agg.and : 0;
-    }
-    if (agg.cnt) {
-      if (agg.min < lo) lo = agg.min;
-      if (agg.max > hi) hi = agg.max;
-    }
-  }
-  return { lo, hi };
-}
-
-/**
- * Pixel columns as fixed bins on an absolute grid: bin j holds samples [j·spp, (j+1)·spp).
- * A sample stays in the same bin while the view scrolls, so the trace doesn't shimmer, and
- * bins that were already complete are copied from the previous frame instead of re-summarised.
- */
+/** One set of summary bins; see BinCache. */
 class Bins {
   constructor(n) {
     this.min = new Float64Array(n);
@@ -112,6 +83,33 @@ class Bins {
   }
 }
 
+/**
+ * Summary bins on a fixed sample grid: bin j holds samples [j·size, (j+1)·size). A sample always
+ * lands in the same bin, so a trace drawn from them doesn't shimmer as the view scrolls or the
+ * recording grows, and each update re-summarises only the bins that weren't complete last time
+ * (it keeps two sets of bins and swaps them). Used for the chart's pixel columns and the overview.
+ */
+export class BinCache {
+  constructor() {
+    this.bins = new Bins(0);
+    this._spare = new Bins(0);
+    this._agg = new Agg();
+  }
+
+  /** Summarise bins first..first+count-1 of a `size`-sample grid; returns the overall { lo, hi }. */
+  update(store, first, count, size) {
+    if (this._spare.min.length < count) {
+      // Grow (with headroom); the old bins can still be reused for this update.
+      this._spare = new Bins(Math.max(count, 2 * this._spare.min.length));
+    }
+    const next = this._spare;
+    const range = next.fill(store, first, count, size, this.bins, this._agg);
+    this._spare = this.bins;
+    this.bins = next;
+    return range;
+  }
+}
+
 export class Chart {
   constructor(canvas) {
     this.canvas = canvas;
@@ -136,7 +134,7 @@ export class Chart {
     this.onviewchange = null;
     this.minimap = null;
 
-    this._cols = 0;
+    this._columns = new BinCache(); // one bin per device pixel column
     this._raw = { v: new Float64Array(0), b: new Uint8Array(0), from: 0, n: 0 };
     this._liveEnd = 0; // right edge of the live view, advanced smoothly by the clock
     this._seenEnd = -1;
@@ -148,8 +146,7 @@ export class Chart {
     this._hi = -Infinity;
     this._drag = null;
     this._dirty = true;
-    this._lastVersion = -1;
-    this._minimapVersion = -1;
+    this._unseen = false; // data arrived that the chart hasn't drawn yet
     this._lastFrame = 0;
 
     this.readColors();
@@ -379,7 +376,8 @@ export class Chart {
    */
   _advanceLive(now) {
     const end = this.dataEnd;
-    if (end !== this._seenEnd) {
+    this._grew = end !== this._seenEnd;
+    if (this._grew) {
       this._seenEnd = end;
       this._lastGrowth = now;
     }
@@ -403,28 +401,15 @@ export class Chart {
 
   _frame(now) {
     const moved = this._advanceLive(now);
-    const version = this.store ? this.store.version : -1;
+    if (this._grew) this._unseen = true;
     // The overview is cheap to redraw, so it follows every frame in which anything changed.
-    if (this.minimap && (moved || this._dirty || version !== this._minimapVersion)) {
-      this._minimapVersion = version;
-      this.minimap.render(now);
-    }
+    if (this.minimap && (moved || this._dirty || this._grew)) this.minimap.render();
     // A scrolling live view redraws every frame; new data elsewhere at most 10 times a second.
-    const changed = version !== this._lastVersion;
-    if (!this._dirty && !moved && !(changed && now - this._lastFrame >= 100)) return;
+    if (!this._dirty && !moved && !(this._unseen && now - this._lastFrame >= 100)) return;
     this._lastFrame = now;
-    this._lastVersion = version;
+    this._unseen = false;
     this._dirty = false;
     this.render();
-  }
-
-  _ensureColumns(cols) {
-    if (cols <= this._cols) return;
-    this._cols = cols;
-    this._bins = new Bins(cols + 2);
-    this._spareBins = new Bins(cols + 2);
-    this._raw.v = new Float64Array(cols + 2);
-    this._raw.b = new Uint8Array(cols + 2);
   }
 
   /** Summarise (or gather raw samples for) the visible range, unless nothing changed since last time. */
@@ -437,15 +422,14 @@ export class Chart {
     this._hi = -Infinity;
     if (!store || !store.length) return;
     if (spp >= 1) {
-      const next = this._spareBins;
-      const { lo, hi } = next.fill(store, Math.floor(from / spp), cols + 2, spp, this._bins, this._agg);
-      this._spareBins = this._bins;
-      this._bins = next;
-      this._lo = lo;
-      this._hi = hi;
+      ({ lo: this._lo, hi: this._hi } = this._columns.update(store, Math.floor(from / spp), cols + 2, spp));
     } else {
       const raw = this._raw;
       const [a, b] = store.clampRange(from, to + 1);
+      if (raw.v.length < b - a) {
+        raw.v = new Float64Array(b - a);
+        raw.b = new Uint8Array(b - a);
+      }
       raw.from = a;
       raw.n = 0;
       for (const seg of store.segments(a, b)) {
@@ -474,7 +458,6 @@ export class Chart {
 
     const cols = Math.max(1, Math.floor(plot.w * this.dpr));
     const spp = this.viewSpan / cols;
-    this._ensureColumns(cols);
     this._gather(from, to, cols, spp);
     if (this.yAuto) this._fitY(this._lo, this._hi);
 
@@ -487,7 +470,7 @@ export class Chart {
       colW: 1 / this.dpr, // one device pixel per bin
       // x of bin k is plot.x + (k + shift) · colW. The shift is rounded to a whole device pixel:
       // at fractional positions anti-aliasing would make thin spikes pulse as they scroll.
-      shift: spp >= 1 ? Math.round(this._bins.first - from / spp) : 0,
+      shift: spp >= 1 ? Math.round(this._columns.bins.first - from / spp) : 0,
       raw: spp < 1,
       pxPerSample: plot.w / this.viewSpan,
       ymap: this._yMap(plot),
@@ -586,7 +569,7 @@ export class Chart {
 
   _drawBands({ plot, ymap, colW: w, shift }) {
     const ctx = this.ctx;
-    const { min, max, count } = this._bins;
+    const { min, max, count } = this._columns.bins;
     ctx.fillStyle = this.colors.trace;
     ctx.beginPath();
     let prevMin = NaN;
@@ -694,7 +677,7 @@ export class Chart {
           if (x1 > x0) step(x0, x1, b[k] & mask ? 1 : 0);
         }
       } else {
-        const { mean, or, and, count } = this._bins;
+        const { mean, or, and, count } = this._columns.bins;
         for (let k = 0; k < count; k++) {
           const x0 = Math.max(d.x, d.x + (k + shift) * w);
           const x1 = Math.min(d.x + d.w, d.x + (k + 1 + shift) * w);
@@ -769,7 +752,7 @@ export class Chart {
       if (value !== value) return;
       text = fmt.current(value);
     } else {
-      const { min, max, mean, count } = this._bins;
+      const { min, max, mean, count } = this._columns.bins;
       const k = clamp(Math.floor((h.x - plot.x) / colW - shift), 0, count - 1);
       value = mean[k];
       if (value !== value) return;
@@ -935,18 +918,23 @@ export class Chart {
   }
 }
 
-/** Overview of the whole buffer with the visible window marked; click or drag to navigate. */
+/**
+ * Overview of the whole recording with the visible window marked; click or drag to navigate.
+ *
+ * The recording is summarised in buckets of a power-of-two number of samples on a fixed grid
+ * (a BinCache), at most two per pixel, so the bucket size only changes when the recording
+ * doubles. Every frame the buckets are projected onto pixel columns, so new data flows in
+ * continuously and the trace only moves as the strip compresses.
+ */
 export class Minimap {
   constructor(canvas, chart) {
     this.canvas = canvas;
     this.chart = chart;
     this.ctx = canvas.getContext('2d');
-    this.cache = document.createElement('canvas');
-    this.cacheVersion = -1;
-    this.cacheTime = 0;
-    this.cacheKey = '';
-    this.cols = { min: new Float64Array(0), max: new Float64Array(0) };
-    this.range = [0, 1]; // sample range the strip currently spans, edge to edge
+    this.range = [0, 1]; // sample range the strip spans, edge to edge
+    this._buckets = new BinCache();
+    this._colMin = new Float64Array(0);
+    this._colMax = new Float64Array(0);
     chart.minimap = this;
     new ResizeObserver(() => {
       fitCanvas(canvas);
@@ -955,8 +943,7 @@ export class Minimap {
 
     let dragging = false;
     const go = (e) => {
-      const store = chart.store;
-      if (!store || !store.length) return;
+      if (!chart.store?.length) return;
       const r = canvas.getBoundingClientRect();
       const frac = clamp((e.clientX - r.left) / r.width, 0, 1);
       const [a, b] = this.range;
@@ -973,7 +960,7 @@ export class Minimap {
     canvas.addEventListener('pointercancel', () => (dragging = false));
   }
 
-  render(now) {
+  render() {
     const store = this.chart.store;
     const { width: W, height: H } = this.canvas;
     const ctx = this.ctx;
@@ -983,22 +970,68 @@ export class Minimap {
     ctx.fillRect(0, 0, W, H);
     if (!store || store.length < 2) return;
 
-    const key = `${W}x${H}:${this.chart.yLog}:${c.trace}`;
-    if (key !== this.cacheKey || (store.version !== this.cacheVersion && now - this.cacheTime > 300)) {
-      this._redraw(store, W, H);
-      this.cacheKey = key;
-      this.cacheVersion = store.version;
-      this.cacheTime = now;
-    }
+    let size = 1;
+    while (store.length / size > 2 * W) size *= 2;
+    const first = Math.floor(store.start / size);
+    this._buckets.update(store, first, Math.floor((store.end - 1) / size) - first + 1, size);
+    const { min, max, count } = this._buckets.bins;
+
     // The strip spans the recording up to the newest sample, or, when following live, up to the
-    // view's right edge, so the window stays pinned there. The cached trace (redrawn a few times a
-    // second) is stretched onto that span every frame, so the strip compresses smoothly in between.
+    // view's right edge, so the window stays pinned there.
     const [from, to] = this.chart.visibleRange();
     const a0 = store.start;
     const a1 = this.chart.live ? Math.max(to, a0 + 1) : store.end;
     this.range = [a0, a1];
     const px = W / (a1 - a0);
-    ctx.drawImage(this.cache, (this.span0 - a0) * px, 0, this.spanLen * px, H);
+
+    // Project buckets onto pixel columns: a narrow bucket goes to the column under its centre,
+    // a wide one (early in a recording) fills every column it covers.
+    if (this._colMin.length !== W) {
+      this._colMin = new Float64Array(W);
+      this._colMax = new Float64Array(W);
+    }
+    const colMin = this._colMin;
+    const colMax = this._colMax;
+    colMin.fill(NaN);
+    colMax.fill(NaN);
+    let lo = Infinity;
+    let hi = -Infinity;
+    const bucketPx = size * px;
+    for (let k = 0; k < count; k++) {
+      const mn = min[k];
+      if (mn !== mn) continue;
+      const x = ((first + k) * size - a0) * px;
+      let c0 = bucketPx < 1 ? Math.floor(x + bucketPx / 2) : Math.floor(x);
+      let c1 = bucketPx < 1 ? c0 : Math.ceil(x + bucketPx) - 1;
+      if (c1 < 0 || c0 >= W) continue;
+      c0 = Math.max(c0, 0);
+      c1 = Math.min(c1, W - 1);
+      const mx = max[k];
+      for (let col = c0; col <= c1; col++) {
+        if (!(colMin[col] <= mn)) colMin[col] = mn;
+        if (!(colMax[col] >= mx)) colMax[col] = mx;
+      }
+      if (mn < lo) lo = mn;
+      if (mx > hi) hi = mx;
+    }
+
+    if (Number.isFinite(lo)) {
+      const f = this.chart.yLog ? toLog : (v) => v;
+      const flo = f(lo);
+      const fhi = f(hi) === flo ? flo + 1 : f(hi);
+      const pad = H * 0.12;
+      const y = (v) => H - pad - ((f(v) - flo) / (fhi - flo)) * (H - 2 * pad);
+      ctx.fillStyle = c.trace;
+      ctx.globalAlpha = 0.75;
+      ctx.beginPath();
+      for (let col = 0; col < W; col++) {
+        if (colMin[col] !== colMin[col]) continue;
+        const y1 = y(colMax[col]);
+        ctx.rect(col, y1, 1, Math.max(1, y(colMin[col]) - y1));
+      }
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
 
     const x0 = (from - a0) * px;
     const x1 = (to - a0) * px;
@@ -1009,35 +1042,5 @@ export class Minimap {
     const b = Math.min(W, Math.max(a + 2, x1));
     ctx.fillRect(a, 0, b - a, H);
     ctx.strokeRect(a + 0.5, 0.5, b - a - 1, H - 1);
-  }
-
-  _redraw(store, W, H) {
-    const cache = this.cache;
-    if (cache.width !== W || cache.height !== H) {
-      cache.width = W;
-      cache.height = H;
-    }
-    if (this.cols.min.length !== W) this.cols = { min: new Float64Array(W), max: new Float64Array(W) };
-    const ctx = cache.getContext('2d');
-    ctx.clearRect(0, 0, W, H);
-    this.span0 = store.start;
-    this.spanLen = store.length;
-    const { min, max } = this.cols;
-    const { lo, hi } = aggregateColumns(store, store.start, store.length / W, W, this.cols);
-    if (!Number.isFinite(lo)) return;
-    const f = this.chart.yLog ? toLog : (v) => v;
-    const flo = f(lo);
-    const fhi = f(hi) === flo ? flo + 1 : f(hi);
-    const pad = H * 0.12;
-    const y = (v) => H - pad - ((f(v) - flo) / (fhi - flo)) * (H - 2 * pad);
-    ctx.fillStyle = this.chart.colors.trace;
-    ctx.globalAlpha = 0.75;
-    ctx.beginPath();
-    for (let k = 0; k < W; k++) {
-      if (min[k] !== min[k]) continue;
-      const y1 = y(max[k]);
-      ctx.rect(k, y1, 1, Math.max(1, y(min[k]) - y1));
-    }
-    ctx.fill();
   }
 }
