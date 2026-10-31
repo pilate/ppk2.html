@@ -308,6 +308,94 @@ details.panel[open] > summary::after {
 }
 
 /* A hint describes the control or heading just above it. */
+/* A heading with a "?" hint at its right end. */
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* Hints: a small "?" that shows a bubble on hover or focus (click/tap focuses it). */
+.tip {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.tip-btn {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--rule);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font: 600 11px/1 var(--ui);
+  cursor: help;
+}
+
+.tip-btn:hover,
+.tip:focus-within .tip-btn {
+  border-color: var(--muted);
+  color: var(--ink);
+}
+
+.tip-body {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: -4px;
+  z-index: 20;
+  width: max-content;
+  max-width: 250px;
+  padding: 8px 11px;
+  border-radius: 6px;
+  background: var(--ink);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+  color: var(--panel);
+  font-size: 13.5px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+}
+
+.tip:hover .tip-body,
+.tip:focus-within .tip-body {
+  display: block;
+}
+
+.tip-body p {
+  margin: 0;
+}
+
+.tip-body p + p {
+  margin-top: 1lh; /* a blank line between paragraphs */
+}
+
+/* A value that comes from your settings, or is worked out from them. */
+.tip-body .value {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tip-body .keys {
+  display: grid;
+  gap: 5px;
+}
+
+.tip-body kbd {
+  border-color: color-mix(in srgb, var(--panel) 40%, transparent);
+  background: transparent;
+  color: inherit;
+}
+
 .hint {
   margin: -6px 0 0;
   color: var(--muted);
@@ -918,17 +1006,6 @@ input[type='range'] {
   border-radius: 6px;
   cursor: pointer;
   touch-action: none;
-}
-
-.help {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 18px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  color: var(--muted);
-  font-size: 13px;
 }
 
 kbd {

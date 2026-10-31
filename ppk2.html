@@ -51,12 +51,14 @@
         </section>
 
         <section class="panel" id="sec-power" data-needs="device">
-          <h2>Power</h2>
+          <div class="panel-head">
+            <h2>Power</h2>
+            <span class="tip"><button class="tip-btn" type="button" aria-label="About the measurement modes" aria-describedby="mode-hint">?</button><span class="tip-body" role="tooltip" id="mode-hint"></span></span>
+          </div>
           <div class="seg" role="radiogroup" aria-label="Measurement mode" id="mode">
             <button type="button" role="radio" data-value="2">Source meter</button>
             <button type="button" role="radio" data-value="1">Ammeter</button>
           </div>
-          <p class="hint" id="mode-hint"></p>
           <div class="field" id="vdd-field">
             <div class="row">
               <label for="vdd-num">Supply voltage</label>
@@ -72,7 +74,10 @@
         </section>
 
         <section class="panel" id="sec-sampling" data-needs="device">
-          <h2>Sampling</h2>
+          <div class="panel-head">
+            <h2>Sampling</h2>
+            <span class="tip"><button class="tip-btn" type="button" aria-label="About recording length" aria-describedby="buffer-hint">?</button><span class="tip-body" role="tooltip" id="buffer-hint"></span></span>
+          </div>
           <div class="row">
             <label for="rate">Sample rate</label>
             <select class="box" id="rate"></select>
@@ -82,7 +87,6 @@
             <span class="box"><input id="limit" type="number" min="0" step="any" placeholder="no limit" /><span class="unit">s</span></span>
           </div>
           <button class="btn primary big" id="btn-start" type="button">Start</button>
-          <p class="hint" id="buffer-hint"></p>
         </section>
 
         <details class="panel" id="sec-trigger">
@@ -140,14 +144,13 @@
         </details>
 
         <details class="panel" id="sec-files">
-          <summary><h2>Files</h2></summary>
+          <summary><h2>Files</h2><span class="tip"><button class="tip-btn" type="button" aria-label="About recording files" aria-describedby="files-hint">?</button><span class="tip-body" role="tooltip" id="files-hint">Recordings use the .ppk2 format, so they also open in nRF Connect.</span></span></summary>
           <div class="panel-body">
             <div class="pair">
               <button class="btn" id="btn-open" type="button">Open recording</button>
               <button class="btn" id="btn-save" type="button">Save recording</button>
             </div>
             <input type="file" id="file-open" accept=".ppk2" hidden />
-            <p class="hint">Recordings use the .ppk2 format, so they also open in nRF Connect.</p>
             <div class="group">
               <h3>Export as CSV</h3>
               <div class="pair">
@@ -178,8 +181,10 @@
               </select>
             </div>
             <div class="group">
-              <h3>Spike filter</h3>
-              <p class="hint">Smooths the glitch the PPK2 produces when it switches measurement range.</p>
+              <div class="panel-head">
+                <h3>Spike filter</h3>
+                <span class="tip"><button class="tip-btn" type="button" aria-label="About the spike filter" aria-describedby="spike-hint">?</button><span class="tip-body" role="tooltip" id="spike-hint">Smooths the glitch the PPK2 produces when it switches measurement range.</span></span>
+              </div>
               <div class="row">
                 <label for="spike-samples">Samples</label>
                 <span class="box"><input id="spike-samples" type="number" min="1" max="10" step="1" /></span>
@@ -195,8 +200,10 @@
               <button class="btn small end" id="btn-spike-reset" type="button">Restore defaults</button>
             </div>
             <div class="group" id="gains-group" data-needs="device">
-              <h3>Range gains</h3>
-              <p class="hint">Fine-tune each measurement range. Values are stored on the PPK2.</p>
+              <div class="panel-head">
+                <h3>Range gains</h3>
+                <span class="tip"><button class="tip-btn" type="button" aria-label="About range gains" aria-describedby="gains-hint">?</button><span class="tip-body" role="tooltip" id="gains-hint">Fine-tune each measurement range. Values are stored on the PPK2.</span></span>
+              </div>
               <div class="stack" id="gains"></div>
             </div>
             <details class="calib">
@@ -252,6 +259,18 @@
             <button class="btn small live-btn" id="btn-live" type="button" title="Follow the newest data (L)">Follow live</button>
           </div>
           <div class="tool-status" id="tool-status"></div>
+          <span class="tip"><button class="tip-btn" type="button" aria-label="Chart controls" aria-describedby="chart-hint">?</button>
+            <span class="tip-body" role="tooltip" id="chart-hint">
+              <span class="keys">
+                <span><kbd>Scroll</kbd> zooms time</span>
+                <span><kbd>Drag</kbd> pans</span>
+                <span><kbd>Shift</kbd> + <kbd>drag</kbd> selects</span>
+                <span><kbd>Double-click</kbd> clears the selection</span>
+                <span><kbd>Click</kbd> a lane below to show it in the big chart</span>
+                <span>Scroll or drag the current axis to rescale it; double-click it to fit</span>
+              </span>
+            </span>
+          </span>
         </div>
 
         <div class="chart-wrap">
@@ -261,14 +280,6 @@
           </div>
         </div>
         <canvas id="minimap" aria-label="Overview of the whole recording. Click to jump."></canvas>
-        <ul class="help">
-          <li><kbd>Scroll</kbd> zooms time</li>
-          <li><kbd>Drag</kbd> pans</li>
-          <li><kbd>Shift</kbd>+<kbd>drag</kbd> selects</li>
-          <li><kbd>Double-click</kbd> clears the selection</li>
-          <li><kbd>Click</kbd> a lane below to show it in the big chart</li>
-          <li>Scroll or drag the current axis to rescale it; double-click it to fit</li>
-        </ul>
       </main>
     </div>
 

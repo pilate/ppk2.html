@@ -567,6 +567,17 @@ document.addEventListener('keydown', (e) => {
   guarded(() => (isRecording() ? endRecording() : startRecording()));
 });
 
+// Hints: a click only focuses the "?" (so it doesn't toggle a section it sits in); Escape closes it.
+document.addEventListener('click', (e) => {
+  const tip = e.target.closest('.tip-btn');
+  if (!tip) return;
+  e.preventDefault();
+  tip.focus(); // Safari doesn't focus buttons on click
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && e.target.closest?.('.tip-btn')) e.target.blur();
+});
+
 window.addEventListener('beforeunload', (e) => {
   if (!hasUnsaved()) return;
   e.preventDefault();
@@ -636,9 +647,11 @@ function syncUI() {
   $('btn-png').disabled = !hasData;
   $('chart-empty').hidden = hasData || recording;
 
-  setText(
+  const keeps = fmt.humanDuration(SampleStore.capacityFor(settings.buffer) / settings.rate);
+  setHTML(
     $('buffer-hint'),
-    `Keeps the last ${fmt.humanDuration(SampleStore.capacityFor(settings.buffer) / settings.rate)} at ${fmt.rateLabel(settings.rate)}. Change the memory limit under Advanced.`,
+    `<p>Keeps the last <span class="value">${keeps}</span> at <span class="value">${fmt.rateLabel(settings.rate)}</span>.</p>` +
+      '<p>Change the memory limit under Advanced.</p>',
   );
 
   const summary = $('trig-summary');
