@@ -210,9 +210,13 @@
       <main class="main">
         <section class="readouts" aria-label="Measurements">
           <div class="meter" id="meter" data-state="idle">
-            <div class="meter-label" id="meter-label">Live average</div>
+            <div class="meter-head">
+              <span class="meter-label">Run average</span>
+              <span class="status" id="status" data-state="off" role="status">
+                <span class="status-dot" aria-hidden="true"></span><span id="status-text">No device</span>
+              </span>
+            </div>
             <div class="meter-value"><span id="meter-num">—</span><span id="meter-unit">A</span></div>
-            <div class="meter-sub" id="meter-sub"></div>
           </div>
           <div class="stats">
             <table class="stats-table" id="stats">

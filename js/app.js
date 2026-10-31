@@ -688,41 +688,35 @@ function statsRow(label, className, store, from, to, showDuration = false) {
   return `<tr class="${className}"><th scope="row">${label}${duration}</th>${tds}</tr>`;
 }
 
+/** What the app is doing, for the indicator next to the live reading: [state, word, tooltip]. */
+function captureStatus() {
+  if (!device) return ['off', 'No device', 'Connect a PPK2, or use the simulated device.'];
+  if (isRecording()) {
+    if (device.mode === PowerMode.Source && !device.dutPower) {
+      return ['warn', 'Output off', 'Turn on Enable power output to power your device.'];
+    }
+    if (recorder.trigger.state === 'armed') return ['armed', 'Waiting', 'Waiting for the trigger.'];
+    return ['recording', 'Recording', ''];
+  }
+  return session.store?.length ? ['stopped', 'Stopped', 'Press Start for a new recording.'] : ['ready', 'Ready', 'Press Start to measure.'];
+}
+
 function updateStats() {
   const store = session.store;
   const recording = isRecording();
 
-  // Live meter
-  const meter = $('meter');
-  if (recording && store?.length) {
-    const agg = store.aggregate(store.end - store.sampleRate * 0.5, store.end);
-    const { num, unit } = fmt.currentParts(agg.mean);
+  // Big reading: average of the whole recording (recent current is the Window row's Average).
+  if (store?.length) {
+    const { num, unit } = fmt.currentParts(store.aggregate(store.start, store.end).mean);
     setText($('meter-num'), num);
     setText($('meter-unit'), unit);
-    setText(
-      $('meter-sub'),
-      device.mode === PowerMode.Source && !device.dutPower
-        ? 'Power output is off. Turn on Enable power output to power your device.'
-        : '',
-    );
-    setText($('meter-label'), 'Live average');
-    meter.dataset.state = 'live';
-  } else if (recording) {
-    setText($('meter-sub'), 'Waiting for data…');
-  } else {
-    meter.dataset.state = 'idle';
-    setText($('meter-label'), store?.length ? 'Last reading' : 'Live average');
-    setText(
-      $('meter-sub'),
-      !device
-        ? store?.length
-          ? 'Recording stopped'
-          : 'Connect a PPK2 and press Start'
-        : store?.length
-          ? 'Stopped. Press Start for a new recording.'
-          : 'Press Start to measure',
-    );
   }
+  $('meter').dataset.state = store?.length ? 'run' : 'idle';
+  const [state, text, hint] = captureStatus();
+  const status = $('status');
+  status.dataset.state = state;
+  status.title = hint;
+  setText($('status-text'), text);
 
   // Window and selection. The selection row comes and goes only when no drag is in progress,
   // so the bar never changes height (and moves the chart) under the pointer.

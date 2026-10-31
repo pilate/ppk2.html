@@ -676,7 +676,7 @@ input[type='range'] {
 
 .readouts {
   display: grid;
-  grid-template-columns: minmax(220px, auto) minmax(0, 1fr);
+  grid-template-columns: 236px minmax(0, 1fr); /* fixed, so the table doesn't move as the status changes */
   border: 1px solid var(--rule);
   border-radius: 8px;
   background: var(--plot-bg);
@@ -693,6 +693,54 @@ input[type='range'] {
   flex-direction: column;
   justify-content: center;
   padding: 5px 22px 9px 18px; /* the label's line spacing adds room above, so less padding there */
+}
+
+.meter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+/* What the app is doing: a coloured symbol and one word. */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status[data-state='off'] .status-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+
+.status[data-state='stopped'] .status-dot {
+  border-radius: 1.5px; /* a square: the stop symbol */
+}
+
+.status[data-state='recording'] {
+  color: var(--trigger);
+}
+
+.status[data-state='armed'],
+.status[data-state='warn'] {
+  color: var(--select);
+}
+
+.status[data-state='recording'] .status-dot,
+.status[data-state='armed'] .status-dot {
+  animation: pulse 1.2s ease-in-out infinite;
 }
 
 .meter-label {
@@ -725,17 +773,6 @@ input[type='range'] {
 
 .meter[data-state='idle'] #meter-num {
   color: var(--muted);
-}
-
-.meter-sub {
-  margin-top: 4px;
-  max-width: 260px;
-  color: var(--muted);
-  font-size: 14px;
-}
-
-.meter-sub:empty {
-  display: none;
 }
 
 /* Window and selection figures: one row each, measurements as columns. */
