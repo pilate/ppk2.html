@@ -1,7 +1,7 @@
 // Canvas chart for current and digital channels, plus the overview strip.
 
 import * as fmt from './format.js';
-import { DIGITAL_CHANNELS } from './protocol.js';
+import { DIGITAL_CHANNELS, clamp } from './protocol.js';
 import { Agg } from './store.js';
 
 const AXIS_W = 76;
@@ -60,6 +60,58 @@ function aggregateColumns(store, from, perCol, n, out, agg = new Agg()) {
   return { lo, hi };
 }
 
+/**
+ * Pixel columns as fixed bins on an absolute grid: bin j holds samples [j·spp, (j+1)·spp).
+ * A sample stays in the same bin while the view scrolls, so the trace doesn't shimmer, and
+ * bins that were already complete are copied from the previous frame instead of re-summarised.
+ */
+class Bins {
+  constructor(n) {
+    this.min = new Float64Array(n);
+    this.max = new Float64Array(n);
+    this.mean = new Float64Array(n);
+    this.or = new Uint8Array(n);
+    this.and = new Uint8Array(n);
+    this.first = 0; // index of bins[0] on the grid
+    this.count = 0;
+    this.spp = 0;
+    this.store = null;
+    this.storeStart = 0;
+    this.complete = 0; // bins with an index below this had all their samples
+  }
+
+  /** Fill bins first..first+count-1, reusing complete bins from `prev` where possible. */
+  fill(store, first, count, spp, prev, agg) {
+    const reusable = prev.store === store && prev.spp === spp && prev.storeStart === store.start;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let k = 0; k < count; k++) {
+      const j = first + k;
+      const p = j - prev.first;
+      if (reusable && p >= 0 && p < prev.count && j < prev.complete) {
+        this.min[k] = prev.min[p];
+        this.max[k] = prev.max[p];
+        this.mean[k] = prev.mean[p];
+        this.or[k] = prev.or[p];
+        this.and[k] = prev.and[p];
+      } else {
+        store.aggregate(j * spp, (j + 1) * spp, agg.reset());
+        this.min[k] = agg.validMin;
+        this.max[k] = agg.validMax;
+        this.mean[k] = agg.mean;
+        this.or[k] = agg.n ? agg.or : 0;
+        this.and[k] = agg.n ? agg.and : 0;
+      }
+      if (this.min[k] < lo) lo = this.min[k];
+      if (this.max[k] > hi) hi = this.max[k];
+    }
+    Object.assign(this, { first, count, spp, store, storeStart: store.start });
+    // One bin of margin, since bin edges are fractional sample indices.
+    this.complete = Math.floor(store.end / spp) - 1;
+    return { lo, hi };
+  }
+}
+
 export class Chart {
   constructor(canvas) {
     this.canvas = canvas;
@@ -86,6 +138,10 @@ export class Chart {
 
     this._cols = 0;
     this._raw = { v: new Float64Array(0), b: new Uint8Array(0), from: 0, n: 0 };
+    this._liveEnd = 0; // right edge of the live view, advanced smoothly by the clock
+    this._seenEnd = -1;
+    this._lastGrowth = 0;
+    this._lastTick = 0;
     this._agg = new Agg();
     this._dataKey = '';
     this._lo = Infinity;
@@ -93,6 +149,7 @@ export class Chart {
     this._drag = null;
     this._dirty = true;
     this._lastVersion = -1;
+    this._minimapVersion = -1;
     this._lastFrame = 0;
 
     this.readColors();
@@ -144,6 +201,7 @@ export class Chart {
   setStore(store) {
     this.store = store;
     this.rate = store?.sampleRate ?? this.rate;
+    this._liveEnd = store?.end ?? 0;
     this.selection = null;
     this.triggerMarker = null;
     this.invalidate();
@@ -175,6 +233,7 @@ export class Chart {
 
   setLive(on) {
     this.live = on;
+    this._liveEnd = this.dataEnd;
     this._viewChanged();
   }
 
@@ -212,7 +271,7 @@ export class Chart {
   }
 
   visibleRange() {
-    const from = this.live ? this.dataEnd - this.viewSpan : this.viewStart;
+    const from = this.live ? this._liveEnd - this.viewSpan : this.viewStart;
     return [from, from + this.viewSpan];
   }
 
@@ -312,33 +371,63 @@ export class Chart {
 
   // ---- rendering ----------------------------------------------------------
 
+  /**
+   * Move the live view's right edge. Samples arrive in bursts (USB reads), so instead of
+   * jumping to the newest sample the edge advances with the clock at the sample rate and
+   * eases toward the newest data minus a short lag, which hides the bursts.
+   * @returns {boolean} whether the edge moved
+   */
+  _advanceLive(now) {
+    const end = this.dataEnd;
+    if (end !== this._seenEnd) {
+      this._seenEnd = end;
+      this._lastGrowth = now;
+    }
+    const dt = this._lastTick ? Math.min(0.1, (now - this._lastTick) / 1000) : 0;
+    this._lastTick = now;
+    if (!this.live) return false;
+    const prev = this._liveEnd;
+    if (now - this._lastGrowth > 250) {
+      // Not sampling: glide the rest of the way to the last sample.
+      const next = prev + (end - prev) * 0.25;
+      this._liveEnd = Math.abs(end - next) < 0.5 ? end : next;
+    } else {
+      const target = end - Math.max(0.06 * this.rate, 2);
+      let next = prev + dt * this.rate;
+      next += (target - next) * 0.08;
+      if (Math.abs(target - next) > 0.5 * this.rate) next = target; // start, or a long stall
+      this._liveEnd = Math.min(next, end);
+    }
+    return this._liveEnd !== prev;
+  }
+
   _frame(now) {
+    const moved = this._advanceLive(now);
     const version = this.store ? this.store.version : -1;
+    // The overview is cheap to redraw, so it follows every frame in which anything changed.
+    if (this.minimap && (moved || this._dirty || version !== this._minimapVersion)) {
+      this._minimapVersion = version;
+      this.minimap.render(now);
+    }
+    // A scrolling live view redraws every frame; new data elsewhere at most 10 times a second.
     const changed = version !== this._lastVersion;
-    if (!this._dirty && !changed) return;
-    if (!this._dirty && now - this._lastFrame < 33) return;
+    if (!this._dirty && !moved && !(changed && now - this._lastFrame >= 100)) return;
     this._lastFrame = now;
     this._lastVersion = version;
     this._dirty = false;
     this.render();
-    this.minimap?.render(now);
   }
 
   _ensureColumns(cols) {
     if (cols <= this._cols) return;
     this._cols = cols;
-    this._colData = {
-      min: new Float64Array(cols),
-      max: new Float64Array(cols),
-      mean: new Float64Array(cols),
-      or: new Uint8Array(cols),
-      and: new Uint8Array(cols),
-    };
+    this._bins = new Bins(cols + 2);
+    this._spareBins = new Bins(cols + 2);
     this._raw.v = new Float64Array(cols + 2);
     this._raw.b = new Uint8Array(cols + 2);
   }
 
-  /** Aggregate (or gather raw samples for) the visible range, unless nothing changed since last time. */
+  /** Summarise (or gather raw samples for) the visible range, unless nothing changed since last time. */
   _gather(from, to, cols, spp) {
     const store = this.store;
     const key = `${store?.version}|${from}|${to}|${cols}`;
@@ -347,7 +436,14 @@ export class Chart {
     this._lo = Infinity;
     this._hi = -Infinity;
     if (!store || !store.length) return;
-    if (spp < 1) {
+    if (spp >= 1) {
+      const next = this._spareBins;
+      const { lo, hi } = next.fill(store, Math.floor(from / spp), cols + 2, spp, this._bins, this._agg);
+      this._spareBins = this._bins;
+      this._bins = next;
+      this._lo = lo;
+      this._hi = hi;
+    } else {
       const raw = this._raw;
       const [a, b] = store.clampRange(from, to + 1);
       raw.from = a;
@@ -361,10 +457,6 @@ export class Chart {
           if (v > this._hi) this._hi = v;
         }
       }
-    } else {
-      const { lo, hi } = aggregateColumns(store, from, spp, cols, this._colData, this._agg);
-      this._lo = lo;
-      this._hi = hi;
     }
   }
 
@@ -392,7 +484,10 @@ export class Chart {
       digital,
       bottom,
       from,
-      cols,
+      colW: 1 / this.dpr, // one device pixel per bin
+      // x of bin k is plot.x + (k + shift) · colW. The shift is rounded to a whole device pixel:
+      // at fractional positions anti-aliasing would make thin spikes pulse as they scroll.
+      shift: spp >= 1 ? Math.round(this._bins.first - from / spp) : 0,
       raw: spp < 1,
       pxPerSample: plot.w / this.viewSpan,
       ymap: this._yMap(plot),
@@ -489,15 +584,14 @@ export class Chart {
     return this.store ? this.store.timeOf(index) : index / this.rate;
   }
 
-  _drawBands({ plot, ymap, cols }) {
+  _drawBands({ plot, ymap, colW: w, shift }) {
     const ctx = this.ctx;
-    const { min, max } = this._colData;
-    const w = 1 / this.dpr;
+    const { min, max, count } = this._bins;
     ctx.fillStyle = this.colors.trace;
     ctx.beginPath();
     let prevMin = NaN;
     let prevMax = NaN;
-    for (let k = 0; k < cols; k++) {
+    for (let k = 0; k < count; k++) {
       let mn = min[k];
       let mx = max[k];
       if (mn !== mn) {
@@ -512,7 +606,7 @@ export class Chart {
       prevMin = min[k];
       prevMax = max[k];
       const y1 = ymap(mx);
-      ctx.rect(plot.x + k * w, y1, w, Math.max(w, ymap(mn) - y1));
+      ctx.rect(plot.x + (k + shift) * w, y1, w, Math.max(1 / this.dpr, ymap(mn) - y1));
     }
     ctx.fill();
   }
@@ -551,10 +645,9 @@ export class Chart {
     ctx.fill();
   }
 
-  _drawDigital({ digital: d, raw, cols, xOf, hasData }) {
+  _drawDigital({ digital: d, raw, colW: w, shift, xOf, hasData }) {
     const ctx = this.ctx;
     const c = this.colors;
-    const w = 1 / this.dpr;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     let lane = 0;
@@ -601,16 +694,18 @@ export class Chart {
           if (x1 > x0) step(x0, x1, b[k] & mask ? 1 : 0);
         }
       } else {
-        const { mean, or, and } = this._colData;
-        for (let k = 0; k < cols; k++) {
-          const x0 = d.x + k * w;
+        const { mean, or, and, count } = this._bins;
+        for (let k = 0; k < count; k++) {
+          const x0 = Math.max(d.x, d.x + (k + shift) * w);
+          const x1 = Math.min(d.x + d.w, d.x + (k + 1 + shift) * w);
+          if (x1 <= x0) continue;
           if (mean[k] !== mean[k] && !or[k] && !and[k]) {
             // No samples here (outside the buffer, or lost).
             flush(x0);
             runState = -1;
             continue;
           }
-          step(x0, x0 + w, and[k] & mask ? 1 : or[k] & mask ? 2 : 0);
+          step(x0, x1, and[k] & mask ? 1 : or[k] & mask ? 2 : 0);
         }
       }
       flush(endX);
@@ -660,7 +755,7 @@ export class Chart {
     }
   }
 
-  _drawHover({ plot, bottom, ymap, raw, cols, from, pxPerSample, hasData }) {
+  _drawHover({ plot, bottom, ymap, raw, colW, shift, from, pxPerSample, hasData }) {
     const h = this.hover;
     if (!h || this._drag || !hasData) return;
     if (h.x < plot.x || h.x > plot.x + plot.w) return;
@@ -674,8 +769,8 @@ export class Chart {
       if (value !== value) return;
       text = fmt.current(value);
     } else {
-      const { min, max, mean } = this._colData;
-      const k = Math.min(cols - 1, Math.max(0, Math.floor((h.x - plot.x) * this.dpr)));
+      const { min, max, mean, count } = this._bins;
+      const k = clamp(Math.floor((h.x - plot.x) / colW - shift), 0, count - 1);
       value = mean[k];
       if (value !== value) return;
       text =
@@ -851,6 +946,7 @@ export class Minimap {
     this.cacheTime = 0;
     this.cacheKey = '';
     this.cols = { min: new Float64Array(0), max: new Float64Array(0) };
+    this.range = [0, 1]; // sample range the strip currently spans, edge to edge
     chart.minimap = this;
     new ResizeObserver(() => {
       fitCanvas(canvas);
@@ -862,8 +958,9 @@ export class Minimap {
       const store = chart.store;
       if (!store || !store.length) return;
       const r = canvas.getBoundingClientRect();
-      const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
-      const i = store.start + frac * store.length;
+      const frac = clamp((e.clientX - r.left) / r.width, 0, 1);
+      const [a, b] = this.range;
+      const i = a + frac * (b - a);
       chart.setView(i - chart.viewSpan / 2, i + chart.viewSpan / 2);
     };
     canvas.addEventListener('pointerdown', (e) => {
@@ -893,11 +990,18 @@ export class Minimap {
       this.cacheVersion = store.version;
       this.cacheTime = now;
     }
-    ctx.drawImage(this.cache, 0, 0);
-
+    // The strip spans the recording up to the newest sample, or, when following live, up to the
+    // view's right edge, so the window stays pinned there. The cached trace (redrawn a few times a
+    // second) is stretched onto that span every frame, so the strip compresses smoothly in between.
     const [from, to] = this.chart.visibleRange();
-    const x0 = ((from - this.span0) / this.spanLen) * W;
-    const x1 = ((to - this.span0) / this.spanLen) * W;
+    const a0 = store.start;
+    const a1 = this.chart.live ? Math.max(to, a0 + 1) : store.end;
+    this.range = [a0, a1];
+    const px = W / (a1 - a0);
+    ctx.drawImage(this.cache, (this.span0 - a0) * px, 0, this.spanLen * px, H);
+
+    const x0 = (from - a0) * px;
+    const x1 = (to - a0) * px;
     ctx.fillStyle = c.selectFill;
     ctx.strokeStyle = c.select;
     ctx.lineWidth = Math.max(1, (window.devicePixelRatio || 1) * 1.25);
