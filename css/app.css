@@ -27,6 +27,7 @@
   --ui: 'Barlow', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --display: 'Barlow Semi Condensed', 'Barlow', system-ui, sans-serif;
   --chart-font: 500 12px 'Barlow', system-ui, sans-serif;
+  --chart-font-strong: 600 12px 'Barlow', system-ui, sans-serif;
 
   --ctl-w: 124px; /* control column in settings rows */
   --ctl-h: 34px;
@@ -307,7 +308,6 @@ details.panel[open] > summary::after {
   gap: 8px;
 }
 
-/* A hint describes the control or heading just above it. */
 /* A heading with a "?" hint at its right end. */
 .panel-head {
   display: flex;
@@ -396,6 +396,7 @@ details.panel[open] > summary::after {
   color: inherit;
 }
 
+/* A hint describes the control or heading just above it. */
 .hint {
   margin: -6px 0 0;
   color: var(--muted);
@@ -727,11 +728,6 @@ select {
   outline-offset: 2px;
 }
 
-.toggle input:disabled ~ * {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .chips {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
@@ -896,7 +892,7 @@ select {
   overflow-x: auto;
 }
 
-/* Fixed layout keeps columns still as values change; separate borders so a hidden row hides its rule too. */
+/* Fixed layout keeps the columns still as the values change. */
 .stats-table {
   width: 100%;
   min-width: 540px;

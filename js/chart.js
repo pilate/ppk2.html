@@ -15,15 +15,25 @@ const LOG_FLOOR = 1e-3; // µA (1 nA)
 const LOG_CEIL = 1e8; // µA (100 A)
 const MIN_SPAN = 10; // samples
 
-function cssVar(el, name, fallback) {
-  return getComputedStyle(el).getPropertyValue(name).trim() || fallback;
-}
+/** Chart colours and fonts, read from these CSS custom properties. */
+const STYLE_VARS = {
+  bg: '--plot-bg',
+  grid: '--grid',
+  axis: '--axis-text',
+  trace: '--trace',
+  select: '--select',
+  selectFill: '--select-fill',
+  trigger: '--trigger',
+  digital: '--digital',
+  laneBg: '--lane-bg',
+  rule: '--rule',
+  cursor: '--cursor',
+  font: '--chart-font',
+  fontStrong: '--chart-font-strong',
+};
 
-function popcount(x) {
-  let n = 0;
-  for (; x; x &= x - 1) n++;
-  return n;
-}
+/** Name of a signal: 'current' is the current through the PPK2's VOUT pin, numbers are D0–D7. */
+export const signalName = (key) => (key === 'current' ? 'VOUT' : `D${key}`);
 
 /** Size a canvas's backing store to its CSS box at device resolution. */
 function fitCanvas(canvas) {
@@ -35,6 +45,22 @@ function fitCanvas(canvas) {
 }
 
 const toLog = (v) => Math.log10(Math.max(LOG_FLOOR, v));
+
+/**
+ * A y mapping that fits [lo, hi] into `span` px above `base`, after converting values with
+ * `axis` (identity, or log for a log axis). A flat range is centred.
+ */
+function fitScale(lo, hi, axis, base, span) {
+  let a = axis(lo);
+  let b = axis(hi);
+  if (b - a < 1e-9) {
+    a -= 1;
+    b += 1;
+  }
+  return (v) => base - ((axis(v) - a) / (b - a)) * span;
+}
+
+const BIN_FIELDS = ['min', 'max', 'mean', 'or', 'and'];
 
 /** One set of summary bins; see BinCache. */
 class Bins {
@@ -54,26 +80,28 @@ class Bins {
 
   /** Fill bins first..first+count-1, reusing complete bins from `prev` where possible. */
   fill(store, first, count, spp, prev, agg) {
-    const reusable = prev.store === store && prev.spp === spp && prev.storeStart === store.start;
+    // Bins that were complete last time are copied in one block, k0..k1-1; the rest are summarised.
+    let k0 = 0;
+    let k1 = 0;
+    if (prev.store === store && prev.spp === spp && prev.storeStart === store.start) {
+      k0 = clamp(prev.first - first, 0, count);
+      k1 = clamp(Math.min(prev.first + prev.count, prev.complete) - first, k0, count);
+      const p0 = first + k0 - prev.first;
+      for (const name of BIN_FIELDS) this[name].set(prev[name].subarray(p0, p0 + k1 - k0), k0);
+    }
+    for (let k = 0; k < count; k++) {
+      if (k >= k0 && k < k1) continue;
+      const j = first + k;
+      store.aggregate(j * spp, (j + 1) * spp, agg.reset());
+      this.min[k] = agg.validMin;
+      this.max[k] = agg.validMax;
+      this.mean[k] = agg.mean;
+      this.or[k] = agg.n ? agg.or : 0;
+      this.and[k] = agg.n ? agg.and : 0;
+    }
     let lo = Infinity;
     let hi = -Infinity;
     for (let k = 0; k < count; k++) {
-      const j = first + k;
-      const p = j - prev.first;
-      if (reusable && p >= 0 && p < prev.count && j < prev.complete) {
-        this.min[k] = prev.min[p];
-        this.max[k] = prev.max[p];
-        this.mean[k] = prev.mean[p];
-        this.or[k] = prev.or[p];
-        this.and[k] = prev.and[p];
-      } else {
-        store.aggregate(j * spp, (j + 1) * spp, agg.reset());
-        this.min[k] = agg.validMin;
-        this.max[k] = agg.validMax;
-        this.mean[k] = agg.mean;
-        this.or[k] = agg.n ? agg.or : 0;
-        this.and[k] = agg.n ? agg.and : 0;
-      }
       if (this.min[k] < lo) lo = this.min[k];
       if (this.max[k] > hi) hi = this.max[k];
     }
@@ -145,7 +173,6 @@ export class Chart {
     this._seenEnd = -1;
     this._lastGrowth = 0;
     this._lastTick = 0;
-    this._agg = new Agg();
     this._dataKey = '';
     this._lo = Infinity;
     this._hi = -Infinity;
@@ -153,6 +180,8 @@ export class Chart {
     this._dirty = true;
     this._unseen = false; // data arrived that the chart hasn't drawn yet
     this._lastFrame = 0;
+    this._minimapStale = true;
+    this._lastMinimap = 0;
 
     this.readColors();
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -174,25 +203,14 @@ export class Chart {
   }
 
   readColors() {
-    const el = this.canvas;
-    this.colors = {
-      bg: cssVar(el, '--plot-bg', '#fff'),
-      grid: cssVar(el, '--grid', '#e3e8eb'),
-      axis: cssVar(el, '--axis-text', '#5d6a73'),
-      trace: cssVar(el, '--trace', '#0b5cad'),
-      select: cssVar(el, '--select', '#c77700'),
-      selectFill: cssVar(el, '--select-fill', 'rgba(199,119,0,.12)'),
-      trigger: cssVar(el, '--trigger', '#b3261e'),
-      digital: cssVar(el, '--digital', '#2f7d5b'),
-      laneBg: cssVar(el, '--lane-bg', '#f3f6f7'),
-      rule: cssVar(el, '--rule', '#cdd5da'),
-      cursor: cssVar(el, '--cursor', '#1a2126'),
-      font: cssVar(el, '--chart-font', '12px sans-serif'),
-    };
+    const style = getComputedStyle(this.canvas);
+    this.colors = Object.fromEntries(
+      Object.entries(STYLE_VARS).map(([key, name]) => [key, style.getPropertyValue(name).trim()]),
+    );
   }
 
   /**
-   * Change display options and redraw: tool, yLog, showDigital, channels,
+   * Change options and redraw: rate, tool, yLog, yAuto, showDigital, channels, main,
    * triggerLevel, triggerMarker. Switching the axis scale refits it.
    */
   configure(patch) {
@@ -310,7 +328,8 @@ export class Chart {
   /** The signal shown in the big chart; falls back to current if its lane is hidden. */
   get mainSignal() {
     const ch = this.main;
-    return ch !== 'current' && this.showDigital && this.channels & (1 << ch) ? ch : 'current';
+    const shown = Number.isInteger(ch) && ch >= 0 && ch < DIGITAL_CHANNELS && this.showDigital && this.channels & (1 << ch);
+    return shown ? ch : 'current';
   }
 
   /** Show a signal ('current' or a channel number) in the big chart. */
@@ -326,9 +345,9 @@ export class Chart {
     // The band below the chart: a small current lane, then each visible digital channel.
     const lanes = [];
     if (this.showDigital) {
-      lanes.push({ key: 'current', label: 'VOUT', h: 2 * LANE_H }); // current through VOUT, named like the PPK2's pin
+      lanes.push({ key: 'current', h: 2 * LANE_H });
       for (let ch = 0; ch < DIGITAL_CHANNELS; ch++) {
-        if (this.channels & (1 << ch)) lanes.push({ key: ch, label: `D${ch}`, h: LANE_H });
+        if (this.channels & (1 << ch)) lanes.push({ key: ch, h: LANE_H });
       }
     }
     const lanesH = lanes.reduce((sum, l) => sum + l.h, 0);
@@ -361,22 +380,25 @@ export class Chart {
     return this.visibleRange()[0] + ((x - plot.x) / plot.w) * this.viewSpan;
   }
 
-  /** Visible current range in axis units (log10 µA in log mode). */
+  /** Current (µA) to current-axis units (log10 µA in log mode), and back. */
+  _toAxis(v) {
+    return this.yLog ? toLog(v) : v;
+  }
+
+  _fromAxis(u) {
+    return this.yLog ? 10 ** u : u;
+  }
+
+  /** Visible current range in axis units. */
   _yDomain() {
-    return this.yLog ? [toLog(this.yMin), toLog(this.yMax)] : [this.yMin, this.yMax];
+    return [this._toAxis(this.yMin), this._toAxis(this.yMax)];
   }
 
   _yMap(plot) {
     const [lo, hi] = this._yDomain();
     const k = plot.h / (hi - lo);
     const bottom = plot.y + plot.h;
-    return this.yLog ? (v) => bottom - (toLog(v) - lo) * k : (v) => bottom - (v - lo) * k;
-  }
-
-  _valueAtY(y, plot) {
-    const [lo, hi] = this._yDomain();
-    const u = lo + ((plot.y + plot.h - y) / plot.h) * (hi - lo);
-    return this.yLog ? 10 ** u : u;
+    return (v) => bottom - (this._toAxis(v) - lo) * k;
   }
 
   /** Set the current axis, keeping it finite, non-empty and (in log mode) between 1 nA and 100 A. */
@@ -422,11 +444,6 @@ export class Chart {
    */
   _advanceLive(now) {
     const end = this.dataEnd;
-    this._grew = end !== this._seenEnd;
-    if (this._grew) {
-      this._seenEnd = end;
-      this._lastGrowth = now;
-    }
     const gap = this._lastTick ? now - this._lastTick : 0;
     const dt = Math.min(0.1, gap / 1000);
     this._lastTick = now;
@@ -449,10 +466,19 @@ export class Chart {
   }
 
   _frame(now) {
+    if (this.dataEnd !== this._seenEnd) {
+      this._seenEnd = this.dataEnd;
+      this._lastGrowth = now;
+      this._unseen = true;
+    }
     const moved = this._advanceLive(now);
-    if (this._grew) this._unseen = true;
-    // The overview is cheap to redraw, so it follows every frame in which anything changed.
-    if (this.minimap && (moved || this._dirty || this._grew)) this.minimap.render();
+    // The overview follows any change, at up to 30 frames a second: it moves far less than the chart.
+    this._minimapStale ||= moved || this._dirty || this._unseen;
+    if (this.minimap && this._minimapStale && now - this._lastMinimap >= 33) {
+      this._minimapStale = false;
+      this._lastMinimap = now;
+      this.minimap.render();
+    }
     // A scrolling live view redraws every frame; new data elsewhere at most 10 times a second.
     if (!this._dirty && !moved && !(this._unseen && now - this._lastFrame >= 100)) return;
     this._lastFrame = now;
@@ -499,6 +525,7 @@ export class Chart {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.cssW, this.cssH);
     ctx.font = c.font;
+    ctx.textBaseline = 'middle';
     const { plot, band, bottom } = this.layout();
     const [from, to] = this.visibleRange();
 
@@ -513,10 +540,13 @@ export class Chart {
 
     // Everything the draw steps need, computed once per frame.
     const f = {
+      main,
       plot,
       band,
       bottom,
       from,
+      to,
+      levels: this._logicLevels(plot),
       colW: 1 / this.dpr, // one device pixel per bin
       // x of bin k is plot.x + (k + shift) · colW. The shift is rounded to a whole device pixel:
       // at fractional positions anti-aliasing would make thin spikes pulse as they scroll.
@@ -537,18 +567,15 @@ export class Chart {
       ctx.fillRect(0, bandTop, this.cssW, 1);
     }
     if (main === 'current') this._drawYGrid(f);
-    else this._drawLevelGrid(f, main);
-    this._drawTimeGrid(f, from, to);
+    else this._drawLevelGrid(f);
+    this._drawTimeGrid(f);
 
     ctx.save();
     ctx.beginPath();
     ctx.rect(plot.x, plot.y, plot.w, plot.h);
     ctx.clip();
     if (f.hasData) {
-      if (main !== 'current') {
-        const { hiY, loY } = this._logicLevels(plot);
-        this._drawLogic(f, main, hiY, loY, 0.14);
-      }
+      if (main !== 'current') this._drawLogic(f, main, f.levels.hiY, f.levels.loY, 0.14);
       else if (f.raw) this._drawRaw(f, f.ymap);
       else this._drawBands(f, f.ymap);
     }
@@ -565,17 +592,18 @@ export class Chart {
     }
     ctx.restore();
 
-    this._drawSignalTag(f, main);
-    if (band.lanes.length) this._drawLanes(f, main);
+    this._drawSignalTag(f);
+    if (band.lanes.length) this._drawLanes(f);
     this._drawOverlays(f);
-    this._drawHover(f, main);
+    this._drawHover(f);
     this._fitAxisColumn();
   }
 
   /** A label in the column left of the plot (right-aligned); remembers the widest for sizing it. */
-  _axisLabel(text, plot, y) {
+  _axisLabel(text, y) {
     this._labelW = Math.max(this._labelW, this.ctx.measureText(text).width);
-    this.ctx.fillText(text, plot.x - 8, y);
+    this.ctx.textAlign = 'right';
+    this.ctx.fillText(text, this._axisW - 8, y);
   }
 
   /**
@@ -597,8 +625,6 @@ export class Chart {
     ctx.fillStyle = c.axis;
     ctx.strokeStyle = c.grid;
     ctx.lineWidth = 1;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
     let values;
     let label;
     if (this.yLog) {
@@ -618,12 +644,12 @@ export class Chart {
       ctx.moveTo(plot.x, y);
       ctx.lineTo(plot.x + plot.w, y);
       ctx.stroke();
-      this._axisLabel(label(v), plot, y);
+      this._axisLabel(label(v), y);
     }
   }
 
   /** Vertical time gridlines through the plot and the lane band, labelled above the plot. */
-  _drawTimeGrid({ plot, band, bottom }, from, to) {
+  _drawTimeGrid({ plot, band, bottom, from, to }) {
     const ctx = this.ctx;
     const t0 = this._time(from);
     const t1 = this._time(to);
@@ -631,7 +657,6 @@ export class Chart {
     ctx.strokeStyle = this.colors.grid;
     ctx.fillStyle = this.colors.axis;
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
     for (const v of t.values) {
       const x = Math.round(plot.x + ((v - t0) / (t1 - t0)) * plot.w) + 0.5;
       ctx.beginPath();
@@ -759,12 +784,10 @@ export class Chart {
   }
 
   /** The band of small lanes; the one shown in the big chart is marked. Click a lane to swap. */
-  _drawLanes(f, main) {
-    const { band: d, hasData } = f;
+  _drawLanes(f) {
+    const { band: d, hasData, main } = f;
     const ctx = this.ctx;
     const c = this.colors;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
     d.lanes.forEach((lane, i) => {
       const { key, top, h } = lane;
       if (i) {
@@ -777,7 +800,7 @@ export class Chart {
         ctx.fillRect(0, top + 2, 3, h - 4);
       }
       ctx.fillStyle = isMain ? c.trace : c.axis;
-      this._axisLabel(lane.label, d, top + h / 2);
+      this._axisLabel(signalName(key), top + h / 2);
       if (!hasData) return;
       if (key === 'current') this._drawCurrentLane(f, lane);
       else this._drawLogic(f, key, top + 4.5, top + h - 3.5, 0.3);
@@ -787,16 +810,7 @@ export class Chart {
   /** Current in a small lane, scaled to its own visible range (log if the axis is). */
   _drawCurrentLane(f, { top, h }) {
     if (!(this._hi >= this._lo)) return;
-    const axis = this.yLog ? toLog : (v) => v;
-    let lo = axis(this._lo);
-    let hi = axis(this._hi);
-    if (hi - lo < 1e-9) {
-      lo -= 1;
-      hi += 1;
-    }
-    const base = top + h - 3;
-    const span = h - 6;
-    const ymap = (v) => base - ((axis(v) - lo) / (hi - lo)) * span;
+    const ymap = fitScale(this._lo, this._hi, (v) => this._toAxis(v), top + h - 3, h - 6);
     const ctx = this.ctx;
     ctx.save();
     ctx.beginPath();
@@ -812,10 +826,9 @@ export class Chart {
     return { hiY: Math.round(plot.y + plot.h * 0.2) + 0.5, loY: Math.round(plot.y + plot.h * 0.8) + 0.5 };
   }
 
-  _drawLevelGrid({ plot }, ch) {
+  _drawLevelGrid({ plot, levels: { hiY, loY } }) {
     const ctx = this.ctx;
     const c = this.colors;
-    const { hiY, loY } = this._logicLevels(plot);
     ctx.strokeStyle = c.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -825,35 +838,39 @@ export class Chart {
     }
     ctx.stroke();
     ctx.fillStyle = c.axis;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-    this._axisLabel('High', plot, hiY);
-    this._axisLabel('Low', plot, loY);
+    this._axisLabel('High', hiY);
+    this._axisLabel('Low', loY);
+  }
+
+  /** A small rounded box over the plot, for the name tag and the hover readout. */
+  _drawBadge(x, y, w, h) {
+    const ctx = this.ctx;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 5);
+    ctx.fillStyle = this.colors.bg;
+    ctx.globalAlpha = 0.9;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = this.colors.rule;
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
 
   /** Name tag in the plot's top-left corner: a legend glyph in the signal's colour and its name. */
-  _drawSignalTag({ plot }, main) {
+  _drawSignalTag({ plot, main }) {
     const ctx = this.ctx;
     const c = this.colors;
     const logic = main !== 'current';
-    const name = logic ? `D${main}` : 'VOUT';
+    const name = signalName(main);
     // Glyph: a small step for a logic channel, a little spike for current (offsets from its left middle).
     const glyph = logic
       ? [[0, 4], [4, 4], [4, -4], [10, -4], [10, 4], [14, 4]]
       : [[0, 3], [5, 3], [7, -4], [9, 3], [14, 3]];
-    ctx.font = c.font.replace(/^\d+ /, '600 ');
+    ctx.font = c.fontStrong;
     const x = plot.x + 8.5;
     const y = plot.y + 8.5;
     const h = 22;
-    ctx.beginPath();
-    ctx.roundRect(x, y, 41 + ctx.measureText(name).width, h, 5);
-    ctx.fillStyle = c.bg;
-    ctx.globalAlpha = 0.9;
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = c.rule;
-    ctx.lineWidth = 1;
-    ctx.stroke();
+    this._drawBadge(x, y, 41 + ctx.measureText(name).width, h);
     ctx.beginPath();
     for (const [dx, dy] of glyph) ctx.lineTo(x + 10 + dx, y + h / 2 + dy);
     ctx.strokeStyle = logic ? c.digital : c.trace;
@@ -862,7 +879,6 @@ export class Chart {
     ctx.stroke();
     ctx.fillStyle = c.cursor;
     ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
     ctx.fillText(name, x + 31, y + h / 2 + 0.5);
     ctx.font = c.font;
   }
@@ -876,10 +892,11 @@ export class Chart {
     const c = this.colors;
     const runs = this._logicRuns(f, ch);
     ctx.fillStyle = c.digital;
-    for (const [x0, x1, state] of runs) {
-      if (state === 0) continue;
-      ctx.globalAlpha = state === 1 ? fill : 0.45;
-      ctx.fillRect(x0, hiY, x1 - x0, loY - hiY);
+    for (const [state, alpha] of [[1, fill], [2, 0.45]]) {
+      ctx.beginPath();
+      for (const [x0, x1, s] of runs) if (s === state) ctx.rect(x0, hiY, x1 - x0, loY - hiY);
+      ctx.globalAlpha = alpha;
+      ctx.fill();
     }
     ctx.globalAlpha = 1;
     ctx.strokeStyle = c.digital;
@@ -943,7 +960,7 @@ export class Chart {
     }
   }
 
-  _drawHover({ plot, bottom, ymap, raw, colW, shift, from, pxPerSample, hasData }, main) {
+  _drawHover({ main, plot, bottom, ymap, raw, colW, shift, from, pxPerSample, hasData, levels }) {
     const h = this.hover;
     if (!h || this._drag || !hasData) return;
     if (h.x < plot.x || h.x > plot.x + plot.w) return;
@@ -960,8 +977,8 @@ export class Chart {
       const inData = i >= this.dataStart && i < this.dataEnd;
       const state = raw ? (inData ? (this.store.bitsAt(i) & mask ? 1 : 0) : -1) : this._binState(k, mask);
       if (state < 0) return;
-      const { hiY, loY } = this._logicLevels(plot);
-      text = `D${main} ${['low', 'high', 'toggling'][state]}`;
+      const { hiY, loY } = levels;
+      text = `${signalName(main)} ${['low', 'high', 'toggling'][state]}`;
       markY = [loY, hiY, (hiY + loY) / 2][state];
     } else if (raw) {
       const value = this.store.valueAt(Math.round(idx));
@@ -995,17 +1012,11 @@ export class Chart {
     const tw = ctx.measureText(label).width + 16;
     let bx = h.x + 10;
     if (bx + tw > plot.x + plot.w) bx = h.x - 10 - tw;
-    const by = plot.y + 6;
-    ctx.fillStyle = c.bg;
-    ctx.globalAlpha = 0.92;
-    ctx.fillRect(bx, by, tw, 22);
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = c.grid;
-    ctx.strokeRect(bx + 0.5, by + 0.5, tw - 1, 21);
+    const by = plot.y + 8.5;
+    this._drawBadge(Math.round(bx) + 0.5, by, tw, 22);
     ctx.fillStyle = c.cursor;
     ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(label, bx + 8, by + 11);
+    ctx.fillText(label, bx + 8, by + 11.5);
   }
 
   // ---- input --------------------------------------------------------------
@@ -1056,8 +1067,7 @@ export class Chart {
         // Shift the axis in its own units (log10 µA in log mode).
         const [lo, hi] = d.domain;
         const shift = ((p.y - d.y) / d.plot.h) * (hi - lo);
-        const back = this.yLog ? (u) => 10 ** u : (u) => u;
-        this._setY(back(lo + shift), back(hi + shift));
+        this._setY(this._fromAxis(lo + shift), this._fromAxis(hi + shift));
       }
       this.invalidate();
     });
@@ -1091,8 +1101,7 @@ export class Chart {
         const dx = e.deltaX * unit;
         if (p.x < plot.x) {
           if (this.mainSignal === 'current') this._zoomY(Math.exp(dy * 0.002), (plot.y + plot.h - p.y) / plot.h);
-        }
-        else if (Math.abs(dx) > Math.abs(dy)) this.pan(dx / plot.w);
+        } else if (Math.abs(dx) > Math.abs(dy)) this.pan(dx / plot.w);
         else this.zoom(Math.exp(dy * 0.002), (p.x - plot.x) / plot.w);
         this.invalidate();
       },
@@ -1103,8 +1112,8 @@ export class Chart {
       const p = pos(e);
       const { plot, band } = this.layout();
       if (this._laneAt(p.y, band)) return; // lane clicks swap signals
-      if (p.x < plot.x) this.yAuto = true;
-      else this.clearSelection();
+      if (p.x >= plot.x) this.clearSelection();
+      else if (this.mainSignal === 'current') this.yAuto = true;
       this.invalidate();
     });
 
@@ -1146,12 +1155,11 @@ export class Chart {
     this.yAuto = false;
     const [lo, hi] = this._yDomain();
     const a = lo + frac * (hi - lo);
-    const back = this.yLog ? (u) => 10 ** u : (u) => u;
-    this._setY(back(a - (a - lo) * factor), back(a + (hi - a) * factor));
+    this._setY(this._fromAxis(a - (a - lo) * factor), this._fromAxis(a + (hi - a) * factor));
   }
 
   _clampIndex(i) {
-    return Math.min(this.dataEnd, Math.max(this.dataStart, Math.round(i)));
+    return clamp(Math.round(i), this.dataStart, this.dataEnd);
   }
 }
 
@@ -1253,11 +1261,8 @@ export class Minimap {
     }
 
     if (Number.isFinite(lo)) {
-      const f = this.chart.yLog ? toLog : (v) => v;
-      const flo = f(lo);
-      const fhi = f(hi) === flo ? flo + 1 : f(hi);
       const pad = H * 0.12;
-      const y = (v) => H - pad - ((f(v) - flo) / (fhi - flo)) * (H - 2 * pad);
+      const y = fitScale(lo, hi, (v) => this.chart._toAxis(v), H - pad, H - 2 * pad);
       ctx.fillStyle = c.trace;
       ctx.globalAlpha = 0.75;
       ctx.beginPath();

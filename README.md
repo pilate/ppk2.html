@@ -68,6 +68,8 @@ selection. `Space` starts and stops sampling.
 ppk2.html, css/app.css       UI (source page)
 build.py                     bundles everything into dist/ppk2.html
 js/app.js                    wires controls, device, recorder and chart together
+js/settings.js               settings defaults, saved in the browser (only what differs from the defaults)
+js/ui.js                     small page widgets: number boxes, steppers, hints, segmented controls
 js/transport.js              Web Serial port, plus a simulated PPK2 (same byte protocol)
 js/ppk2.js                   device commands, metadata/calibration readout, sample stream
 js/protocol.js               command bytes, metadata parser, sample decoder and calibration
@@ -101,8 +103,8 @@ sample: little-endian `float32` current in µA, NaN for lost samples, then a big
 digital channel: `01` low, `10` high, `11` toggled within the sample). The ZIP code (`js/zip.js`) uses the
 browser's built-in deflate, so saving and opening work in Firefox too, where files save as downloads.
 
-From the browser console, `ppk2.chart`, `ppk2.recorder`, `ppk2.device` and `ppk2.session` give access to the live
-objects.
+From the browser console, `ppk2.chart`, `ppk2.recorder`, `ppk2.device`, `ppk2.session` and `ppk2.settings` give
+access to the live objects.
 
 ## Tests
 
@@ -111,8 +113,9 @@ npm test        # or: node --test tests/*.test.js
 ```
 
 The tests cover metadata parsing, command encoding, decoding across ranges and split reads, lost-sample
-detection, stream realignment, storage aggregates against brute force (including eviction), downsampling,
-the trigger, session save/load and CSV export, and an end-to-end run against the simulated device.
+detection, stream realignment, storage aggregates against brute force (including eviction), the chart's
+reusable summary bins, downsampling, the trigger, saving settings, `.ppk2` save/load and CSV export, and an
+end-to-end run against the simulated device.
 
 ## Not yet supported
 
