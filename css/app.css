@@ -194,12 +194,15 @@ select {
 /* ---- layout --------------------------------------------------------------- */
 
 .layout {
+  --side-w: 308px;
+  position: relative;
   display: grid;
-  grid-template-columns: 308px minmax(0, 1fr);
+  grid-template-columns: var(--side-w) minmax(0, 1fr);
   height: calc(100% - 52px);
 }
 
-/* The sidebar can be hidden to give the chart the whole width. */
+/* The sidebar collapses to give the chart the whole width; a tab on its edge (in the main
+   area's padding, so it never covers the chart) hides and shows it. */
 .side-hidden .layout {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -207,6 +210,48 @@ select {
 .side-hidden .side,
 body:not(.side-hidden) #btn-start-top {
   display: none;
+}
+
+.side-tab {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: var(--side-w);
+  width: 14px;
+  height: 56px;
+  margin-top: -28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--rule);
+  border-left: 0;
+  border-radius: 0 6px 6px 0;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.side-tab:hover {
+  background: var(--btn-hover);
+  color: var(--ink);
+}
+
+.side-tab svg {
+  width: 8px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.side-hidden .side-tab {
+  left: 0;
+}
+
+.side-hidden .side-tab svg {
+  transform: scaleX(-1);
 }
 
 .side {
@@ -1099,6 +1144,13 @@ kbd {
   .side {
     border-right: 0;
     border-bottom: 1px solid var(--rule);
+  }
+  .side-hidden .side {
+    display: block;
+  }
+  .side-tab,
+  #btn-start-top {
+    display: none;
   }
   .main {
     padding: 16px;
