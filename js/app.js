@@ -533,16 +533,20 @@ function syncUI() {
   $('btn-connect').disabled = connecting || !SerialTransport.supported;
   $('btn-demo').disabled = connecting;
   for (const el of document.querySelectorAll('[data-needs="device"]')) el.dataset.disabled = String(!connected);
+  // Settings a recording takes at its start are locked until it ends.
+  for (const el of document.querySelectorAll('[data-lock]')) {
+    el.dataset.locked = String(recording);
+    el.title = recording ? 'Fixed while recording' : '';
+    for (const control of el.querySelectorAll('input, select, button')) control.disabled = recording;
+  }
 
   $('vdd-field').hidden = connected && device.mode !== PowerMode.Source;
-  modeSeg.disable(recording);
 
   for (const start of document.querySelectorAll('.start-btn')) {
     setText(start, recording ? 'Stop' : settings.trigger.enabled ? 'Start and wait for trigger' : 'Start');
     start.dataset.running = String(recording);
     start.disabled = !connected;
   }
-  $('rate').disabled = recording;
 
   const hasData = !!session.store?.length;
   const fileBlocked = recording || busy;

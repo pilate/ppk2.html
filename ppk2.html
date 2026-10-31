@@ -59,7 +59,7 @@
             <h2>Power</h2>
             <span class="tip"><button class="tip-btn" type="button" aria-label="About the measurement modes" aria-describedby="mode-hint">?</button><span class="tip-body" role="tooltip" id="mode-hint"><p><strong>Source meter:</strong> the PPK2 powers your device from VOUT and measures the current it draws.</p><p><strong>Ammeter:</strong> your device keeps its own supply. Wire the PPK2 in series with it: supply to VIN, your device to VOUT.</p></span></span>
           </div>
-          <div class="seg" role="radiogroup" aria-label="Measurement mode" id="mode">
+          <div class="seg" role="radiogroup" aria-label="Measurement mode" id="mode" data-lock>
             <button type="button" role="radio" data-value="2">Source meter</button>
             <button type="button" role="radio" data-value="1">Ammeter</button>
           </div>
@@ -84,11 +84,11 @@
             <h2>Sampling</h2>
             <span class="tip"><button class="tip-btn" type="button" aria-label="About recording length" aria-describedby="buffer-hint">?</button><span class="tip-body" role="tooltip" id="buffer-hint"></span></span>
           </div>
-          <div class="row">
+          <div class="row" data-lock>
             <label for="rate">Sample rate</label>
             <select class="box" id="rate"></select>
           </div>
-          <div class="row">
+          <div class="row" data-lock>
             <label for="limit">Stop after</label>
             <span class="box"><input id="limit" type="number" min="0" step="any" placeholder="no limit" /><span class="unit">s</span></span>
           </div>
@@ -176,7 +176,7 @@
         <details class="panel" id="sec-advanced">
           <summary><h2>Advanced</h2></summary>
           <div class="panel-body">
-            <div class="row">
+            <div class="row" data-lock>
               <label for="buffer">Memory limit</label>
               <select class="box" id="buffer">
                 <option value="268435456">256 MB</option>

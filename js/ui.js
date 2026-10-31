@@ -44,7 +44,7 @@ export function segmented(id, value, onChange) {
     });
   }
   set(value);
-  return { set, disable: (d) => buttons.forEach((b) => (b.disabled = d)) };
+  return { set };
 }
 
 const isNumberBox = (el) => el instanceof HTMLInputElement && el.type === 'number';
