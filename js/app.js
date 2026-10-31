@@ -517,14 +517,7 @@ function syncUI() {
   $('btn-demo').disabled = connecting;
   for (const el of document.querySelectorAll('[data-needs="device"]')) el.dataset.disabled = String(!connected);
 
-  const source = !connected || device.mode === PowerMode.Source;
-  $('vdd-field').hidden = !source;
-  setText(
-    $('mode-hint'),
-    source
-      ? 'The PPK2 powers your device from VOUT and measures what it draws.'
-      : 'Wire the PPK2 in series with your own supply: supply to VIN, your device to VOUT.',
-  );
+  $('vdd-field').hidden = connected && device.mode !== PowerMode.Source;
   modeSeg.disable(recording);
 
   const start = $('btn-start');
