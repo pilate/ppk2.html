@@ -52,7 +52,7 @@ Every push to `main` runs the tests, builds `dist/ppk2.html` and publishes it to
 | **Power** | Set supply voltage, switch power output on and off |
 | **Sampling** | 100 kHz native, or averaged down to 50k/20k/10k/1k/100/10/1 Hz for long recordings; optional stop-after duration |
 | **Chart** | Live view, scroll to zoom, drag to pan, min/max envelope at any zoom down to individual samples, linear or log current axis, overview strip of the whole recording |
-| **Digital** | D0–D7 logic lanes, each one can be shown or hidden |
+| **Lanes** | A band below the chart with a small current lane and D0–D7 logic lanes (each can be shown or hidden); click a lane to show that signal in the big chart, as a current trace or a large logic waveform |
 | **Measure** | Average current of the whole run; average, min, max, charge and energy for the visible window and for a selected range (with its duration); a status indicator for recording, waiting for a trigger, stopped and so on |
 | **Trigger** | Rising or falling edge at a current level, capture length, pre-trigger percentage, single or continuous |
 | **Files** | Save and open recordings as `.ppk2`, the same format as nRF Connect, so files open in either app; export everything or the selection as CSV with the same columns as nRF Connect; save the chart as PNG |

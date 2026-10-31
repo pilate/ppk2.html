@@ -7,10 +7,10 @@ import { Agg } from './store.js';
 const AXIS_W = 76;
 const RIGHT_PAD = 16;
 const TIME_AXIS_H = 30; // time labels, above the plot
-const BOTTOM_PAD = 10; // below the plot when there are no digital lanes (room for its lowest label)
+const BOTTOM_PAD = 10; // below the plot when the lanes are hidden (room for its lowest label)
 const LANE_H = 18;
-const LANE_GAP = 22; // between the current plot and the digital band; room for the lowest axis label
-const BAND_PAD = 6; // digital band padding above the first lane and below the last
+const LANE_GAP = 22; // between the big chart and the lane band; room for its lowest axis label
+const BAND_PAD = 6; // lane band padding above the first lane and below the last
 const LOG_FLOOR = 1e-3; // µA (1 nA)
 const LOG_CEIL = 1e8; // µA (100 A)
 const MIN_SPAN = 10; // samples
@@ -130,6 +130,8 @@ export class Chart {
     this.channels = 0xff;
     this.triggerLevel = null; // µA, drawn as a dashed line while armed
     this.triggerMarker = null; // sample index
+    this.main = 'current'; // signal in the big chart: 'current' or a digital channel number
+    this.onmainchange = null;
     this.hover = null; // { x, y } css px
     this.onselect = null;
     this.onviewchange = null;
@@ -301,21 +303,55 @@ export class Chart {
     else this.viewStart = Math.min(hi - span, Math.max(lo, this.viewStart));
   }
 
+  // ---- main signal and lanes ----------------------------------------------
+
+  /** The signal shown in the big chart; falls back to current if its lane is hidden. */
+  get mainSignal() {
+    const ch = this.main;
+    return ch !== 'current' && this.showDigital && this.channels & (1 << ch) ? ch : 'current';
+  }
+
+  /** Show a signal ('current' or a channel number) in the big chart. */
+  setMain(key) {
+    this.main = key;
+    this.invalidate();
+    this.onmainchange?.(key);
+  }
+
   // ---- layout and scales --------------------------------------------------
 
   layout() {
-    const lanes = this.showDigital ? popcount(this.channels) : 0;
-    // The digital band, when shown, runs to the bottom edge of the chart.
-    const below = lanes ? LANE_GAP + lanes * LANE_H + BAND_PAD : BOTTOM_PAD;
+    // The band below the chart: a small current lane, then each visible digital channel.
+    const lanes = [];
+    if (this.showDigital) {
+      lanes.push({ key: 'current', label: 'VOUT', h: 2 * LANE_H }); // current through VOUT, named like the PPK2's pin
+      for (let ch = 0; ch < DIGITAL_CHANNELS; ch++) {
+        if (this.channels & (1 << ch)) lanes.push({ key: ch, label: `D${ch}`, h: LANE_H });
+      }
+    }
+    const lanesH = lanes.reduce((sum, l) => sum + l.h, 0);
+    // The band, when shown, runs to the bottom edge of the chart.
+    const below = lanes.length ? LANE_GAP + lanesH + BAND_PAD : BOTTOM_PAD;
     const plot = {
       x: AXIS_W,
       y: TIME_AXIS_H,
       w: Math.max(10, this.cssW - AXIS_W - RIGHT_PAD),
       h: Math.max(40, this.cssH - TIME_AXIS_H - below),
     };
-    const digital = { x: plot.x, y: plot.y + plot.h + LANE_GAP, w: plot.w, h: lanes * LANE_H, lanes };
-    const bottom = lanes ? digital.y + digital.h + BAND_PAD : plot.y + plot.h;
-    return { plot, digital, bottom };
+    const band = { x: plot.x, y: plot.y + plot.h + LANE_GAP, w: plot.w, h: lanesH, lanes };
+    let top = band.y;
+    for (const lane of lanes) {
+      lane.top = top;
+      top += lane.h;
+    }
+    const bottom = lanes.length ? band.y + band.h + BAND_PAD : plot.y + plot.h;
+    return { plot, band, bottom };
+  }
+
+  /** The lane under a y position, if it's in the band. */
+  _laneAt(y, band) {
+    if (!band.lanes.length || y < band.y - BAND_PAD) return null;
+    return band.lanes.find((l) => y < l.top + l.h) ?? band.lanes.at(-1);
   }
 
   indexAtX(x) {
@@ -461,7 +497,7 @@ export class Chart {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.cssW, this.cssH);
     ctx.font = c.font;
-    const { plot, digital, bottom } = this.layout();
+    const { plot, band, bottom } = this.layout();
     const [from, to] = this.visibleRange();
 
     ctx.fillStyle = c.bg;
@@ -470,12 +506,13 @@ export class Chart {
     const cols = Math.max(1, Math.floor(plot.w * this.dpr));
     const spp = this.viewSpan / cols;
     this._gather(from, to, cols, spp);
-    if (this.yAuto) this._fitY(this._lo, this._hi);
+    const main = this.mainSignal;
+    if (this.yAuto && main === 'current') this._fitY(this._lo, this._hi);
 
     // Everything the draw steps need, computed once per frame.
     const f = {
       plot,
-      digital,
+      band,
       bottom,
       from,
       colW: 1 / this.dpr, // one device pixel per bin
@@ -489,15 +526,16 @@ export class Chart {
     };
     f.xOf = (i) => plot.x + (i - from) * f.pxPerSample;
 
-    // The digital channels sit on their own full-width band, ruled off from the current plot.
-    if (digital.lanes) {
-      const bandTop = digital.y - BAND_PAD;
+    // The lanes sit on their own full-width band, ruled off from the big chart.
+    if (band.lanes.length) {
+      const bandTop = band.y - BAND_PAD;
       ctx.fillStyle = c.laneBg;
       ctx.fillRect(0, bandTop, this.cssW, bottom - bandTop);
       ctx.fillStyle = c.rule;
       ctx.fillRect(0, bandTop, this.cssW, 1);
     }
-    this._drawYGrid(f);
+    if (main === 'current') this._drawYGrid(f);
+    else this._drawLevelGrid(f, main);
     this._drawTimeGrid(f, from, to);
 
     ctx.save();
@@ -505,10 +543,14 @@ export class Chart {
     ctx.rect(plot.x, plot.y, plot.w, plot.h);
     ctx.clip();
     if (f.hasData) {
-      if (f.raw) this._drawRaw(f);
-      else this._drawBands(f);
+      if (main !== 'current') {
+        const { hiY, loY } = this._logicLevels(plot);
+        this._drawLogic(f, main, hiY, loY, 0.14);
+      }
+      else if (f.raw) this._drawRaw(f, f.ymap);
+      else this._drawBands(f, f.ymap);
     }
-    if (this.triggerLevel !== null) {
+    if (this.triggerLevel !== null && main === 'current') {
       const y = Math.round(f.ymap(this.triggerLevel)) + 0.5;
       ctx.strokeStyle = c.trigger;
       ctx.setLineDash([6, 4]);
@@ -521,9 +563,10 @@ export class Chart {
     }
     ctx.restore();
 
-    if (digital.lanes) this._drawDigital(f);
+    this._drawSignalTag(f, main);
+    if (band.lanes.length) this._drawLanes(f, main);
     this._drawOverlays(f);
-    this._drawHover(f);
+    this._drawHover(f, main);
   }
 
   _drawYGrid({ plot, ymap }) {
@@ -557,8 +600,8 @@ export class Chart {
     }
   }
 
-  /** Vertical time gridlines through the plot and digital band, labelled above the plot. */
-  _drawTimeGrid({ plot, digital, bottom }, from, to) {
+  /** Vertical time gridlines through the plot and the lane band, labelled above the plot. */
+  _drawTimeGrid({ plot, band, bottom }, from, to) {
     const ctx = this.ctx;
     const t0 = this._time(from);
     const t1 = this._time(to);
@@ -572,8 +615,8 @@ export class Chart {
       ctx.beginPath();
       ctx.moveTo(x, plot.y);
       ctx.lineTo(x, plot.y + plot.h);
-      if (digital.lanes) {
-        ctx.moveTo(x, digital.y - BAND_PAD);
+      if (band.lanes.length) {
+        ctx.moveTo(x, band.y - BAND_PAD);
         ctx.lineTo(x, bottom);
       }
       ctx.stroke();
@@ -589,7 +632,8 @@ export class Chart {
     return this.store ? this.store.timeOf(index) : index / this.rate;
   }
 
-  _drawBands({ plot, ymap, colW: w, shift }) {
+  /** Current as a min/max band per column, on the vertical scale `ymap`. */
+  _drawBands({ plot, colW: w, shift }, ymap) {
     const ctx = this.ctx;
     const { min, max, count } = this._columns.bins;
     ctx.fillStyle = this.colors.trace;
@@ -616,7 +660,8 @@ export class Chart {
     ctx.fill();
   }
 
-  _drawRaw({ ymap, xOf, pxPerSample }) {
+  /** Current as a line through each sample (zoomed in), on the vertical scale `ymap`. */
+  _drawRaw({ xOf, pxPerSample }, ymap) {
     const ctx = this.ctx;
     const { v, from, n } = this._raw;
     const dots = pxPerSample > 7;
@@ -650,73 +695,187 @@ export class Chart {
     ctx.fill();
   }
 
-  _drawDigital({ digital: d, raw, colW: w, shift, xOf, hasData }) {
+  /** State of channel bit `mask` in column bin k: -1 no samples, 0 low, 1 high, 2 toggling within it. */
+  _binState(k, mask) {
+    const { mean, or, and } = this._columns.bins;
+    if (mean[k] !== mean[k] && !or[k] && !and[k]) return -1; // outside the buffer, or lost
+    return and[k] & mask ? 1 : or[k] & mask ? 2 : 0;
+  }
+
+  /**
+   * Where digital channel `ch` is low (0), high (1) or toggling within a column (2), as runs
+   * [x0, x1, state] across the plot; gaps where there are no samples split the runs.
+   */
+  _logicRuns({ plot, raw, colW: w, shift, xOf }, ch) {
+    const mask = 1 << ch;
+    const left = plot.x;
+    const right = plot.x + plot.w;
+    const runs = [];
+    let run = null;
+    const step = (x0, x1, state) => {
+      if (run && run[2] === state && x0 - run[1] < 0.5) run[1] = x1;
+      else runs.push((run = [x0, x1, state]));
+    };
+    if (raw) {
+      const { b, from, n } = this._raw;
+      for (let k = 0; k < n; k++) {
+        const x0 = Math.max(left, xOf(from + k));
+        const x1 = Math.min(right, xOf(from + k + 1));
+        if (x1 > x0) step(x0, x1, b[k] & mask ? 1 : 0);
+      }
+    } else {
+      for (let k = 0; k < this._columns.bins.count; k++) {
+        const x0 = Math.max(left, left + (k + shift) * w);
+        const x1 = Math.min(right, left + (k + 1 + shift) * w);
+        if (x1 <= x0) continue;
+        const state = this._binState(k, mask);
+        if (state < 0) run = null; // a gap splits the runs
+        else step(x0, x1, state);
+      }
+    }
+    return runs;
+  }
+
+  /** The band of small lanes; the one shown in the big chart is marked. Click a lane to swap. */
+  _drawLanes(f, main) {
+    const { band: d, hasData } = f;
     const ctx = this.ctx;
     const c = this.colors;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    let lane = 0;
-    for (let ch = 0; ch < DIGITAL_CHANNELS; ch++) {
-      if (!(this.channels & (1 << ch))) continue;
-      const top = d.y + lane * LANE_H;
-      const hiY = top + 3;
-      const loY = top + LANE_H - 4;
-      if (lane++) {
+    d.lanes.forEach((lane, i) => {
+      const { key, top, h } = lane;
+      if (i) {
         ctx.fillStyle = c.grid;
         ctx.fillRect(d.x, top, d.w, 1);
       }
-      ctx.fillStyle = c.axis;
-      ctx.fillText(`D${ch}`, d.x - 8, top + LANE_H / 2);
-      if (!hasData) continue;
-      ctx.fillStyle = c.digital;
-      const mask = 1 << ch;
-
-      // Runs of equal state are drawn as one rectangle. State: 0 low, 1 high, 2 toggling within a column.
-      let runX = 0;
-      let runState = -1;
-      let endX = 0;
-      const flush = (x) => {
-        if (runState === 1) ctx.fillRect(runX, hiY, x - runX, loY - hiY);
-        else if (runState === 0) ctx.fillRect(runX, loY - 1, x - runX, 1.5);
-        else if (runState === 2) {
-          ctx.globalAlpha = 0.45;
-          ctx.fillRect(runX, hiY, x - runX, loY - hiY);
-          ctx.globalAlpha = 1;
-        }
-      };
-      const step = (x0, x1, state) => {
-        if (state !== runState) {
-          flush(x0);
-          runX = x0;
-          runState = state;
-        }
-        endX = x1;
-      };
-
-      if (raw) {
-        const { b, from, n } = this._raw;
-        for (let k = 0; k < n; k++) {
-          const x0 = Math.max(d.x, xOf(from + k));
-          const x1 = Math.min(d.x + d.w, xOf(from + k + 1));
-          if (x1 > x0) step(x0, x1, b[k] & mask ? 1 : 0);
-        }
-      } else {
-        const { mean, or, and, count } = this._columns.bins;
-        for (let k = 0; k < count; k++) {
-          const x0 = Math.max(d.x, d.x + (k + shift) * w);
-          const x1 = Math.min(d.x + d.w, d.x + (k + 1 + shift) * w);
-          if (x1 <= x0) continue;
-          if (mean[k] !== mean[k] && !or[k] && !and[k]) {
-            // No samples here (outside the buffer, or lost).
-            flush(x0);
-            runState = -1;
-            continue;
-          }
-          step(x0, x1, and[k] & mask ? 1 : or[k] & mask ? 2 : 0);
-        }
+      const isMain = key === main;
+      if (isMain) {
+        ctx.fillStyle = c.trace;
+        ctx.fillRect(0, top + 2, 3, h - 4);
       }
-      flush(endX);
+      ctx.fillStyle = isMain ? c.trace : c.axis;
+      ctx.fillText(lane.label, d.x - 8, top + h / 2);
+      if (!hasData) return;
+      if (key === 'current') this._drawCurrentLane(f, lane);
+      else this._drawLogic(f, key, top + 4.5, top + h - 3.5, 0.3);
+    });
+  }
+
+  /** Current in a small lane, scaled to its own visible range (log if the axis is). */
+  _drawCurrentLane(f, { top, h }) {
+    if (!(this._hi >= this._lo)) return;
+    const axis = this.yLog ? toLog : (v) => v;
+    let lo = axis(this._lo);
+    let hi = axis(this._hi);
+    if (hi - lo < 1e-9) {
+      lo -= 1;
+      hi += 1;
     }
+    const base = top + h - 3;
+    const span = h - 6;
+    const ymap = (v) => base - ((axis(v) - lo) / (hi - lo)) * span;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(f.plot.x, top + 1, f.plot.w, h - 1);
+    ctx.clip();
+    if (f.raw) this._drawRaw(f, ymap);
+    else this._drawBands(f, ymap);
+    ctx.restore();
+  }
+
+  /** High and low levels of a digital channel shown in the big chart. */
+  _logicLevels(plot) {
+    return { hiY: Math.round(plot.y + plot.h * 0.2) + 0.5, loY: Math.round(plot.y + plot.h * 0.8) + 0.5 };
+  }
+
+  _drawLevelGrid({ plot }, ch) {
+    const ctx = this.ctx;
+    const c = this.colors;
+    const { hiY, loY } = this._logicLevels(plot);
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const y of [hiY, loY]) {
+      ctx.moveTo(plot.x, y);
+      ctx.lineTo(plot.x + plot.w, y);
+    }
+    ctx.stroke();
+    ctx.fillStyle = c.axis;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('High', plot.x - 8, hiY);
+    ctx.fillText('Low', plot.x - 8, loY);
+  }
+
+  /** Name tag in the plot's top-left corner: a legend glyph in the signal's colour and its name. */
+  _drawSignalTag({ plot }, main) {
+    const ctx = this.ctx;
+    const c = this.colors;
+    const logic = main !== 'current';
+    const name = logic ? `D${main}` : 'VOUT';
+    // Glyph: a small step for a logic channel, a little spike for current (offsets from its left middle).
+    const glyph = logic
+      ? [[0, 4], [4, 4], [4, -4], [10, -4], [10, 4], [14, 4]]
+      : [[0, 3], [5, 3], [7, -4], [9, 3], [14, 3]];
+    ctx.font = c.font.replace(/^\d+ /, '600 ');
+    const x = plot.x + 8.5;
+    const y = plot.y + 8.5;
+    const h = 22;
+    ctx.beginPath();
+    ctx.roundRect(x, y, 41 + ctx.measureText(name).width, h, 5);
+    ctx.fillStyle = c.bg;
+    ctx.globalAlpha = 0.9;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = c.rule;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.beginPath();
+    for (const [dx, dy] of glyph) ctx.lineTo(x + 10 + dx, y + h / 2 + dy);
+    ctx.strokeStyle = logic ? c.digital : c.trace;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+    ctx.fillStyle = c.cursor;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(name, x + 31, y + h / 2 + 0.5);
+    ctx.font = c.font;
+  }
+
+  /**
+   * Digital channel `ch` as a logic trace between levels hiY and loY (in a lane or the big chart):
+   * high stretches filled at opacity `fill`, stretches that toggle faster than a pixel shaded solid.
+   */
+  _drawLogic(f, ch, hiY, loY, fill) {
+    const ctx = this.ctx;
+    const c = this.colors;
+    const runs = this._logicRuns(f, ch);
+    ctx.fillStyle = c.digital;
+    for (const [x0, x1, state] of runs) {
+      if (state === 0) continue;
+      ctx.globalAlpha = state === 1 ? fill : 0.45;
+      ctx.fillRect(x0, hiY, x1 - x0, loY - hiY);
+    }
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = c.digital;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    let lastX = null;
+    for (const [x0, x1, state] of runs) {
+      if (state === 2) {
+        lastX = null;
+        continue;
+      }
+      const y = state ? hiY : loY;
+      if (lastX !== null && x0 - lastX < 0.5) ctx.lineTo(x0, y); // edge from the previous level
+      else ctx.moveTo(x0, y);
+      ctx.lineTo(x1, y);
+      lastX = x1;
+    }
+    ctx.stroke();
   }
 
   _drawOverlays({ plot, bottom, xOf }) {
@@ -762,28 +921,40 @@ export class Chart {
     }
   }
 
-  _drawHover({ plot, bottom, ymap, raw, colW, shift, from, pxPerSample, hasData }) {
+  _drawHover({ plot, bottom, ymap, raw, colW, shift, from, pxPerSample, hasData }, main) {
     const h = this.hover;
     if (!h || this._drag || !hasData) return;
     if (h.x < plot.x || h.x > plot.x + plot.w) return;
     const ctx = this.ctx;
     const c = this.colors;
     const idx = from + (h.x - plot.x) / pxPerSample;
+    const k = raw ? 0 : clamp(Math.floor((h.x - plot.x) / colW - shift), 0, this._columns.bins.count - 1);
     let text;
-    let value;
-    if (raw) {
-      value = this.store.valueAt(Math.round(idx));
+    let markY;
+    if (main !== 'current') {
+      // State of the channel under the cursor: low, high, or toggling within the column.
+      const mask = 1 << main;
+      const i = Math.round(idx);
+      const inData = i >= this.dataStart && i < this.dataEnd;
+      const state = raw ? (inData ? (this.store.bitsAt(i) & mask ? 1 : 0) : -1) : this._binState(k, mask);
+      if (state < 0) return;
+      const { hiY, loY } = this._logicLevels(plot);
+      text = `D${main} ${['low', 'high', 'toggling'][state]}`;
+      markY = [loY, hiY, (hiY + loY) / 2][state];
+    } else if (raw) {
+      const value = this.store.valueAt(Math.round(idx));
       if (value !== value) return;
       text = fmt.current(value);
+      markY = ymap(value);
     } else {
-      const { min, max, mean, count } = this._columns.bins;
-      const k = clamp(Math.floor((h.x - plot.x) / colW - shift), 0, count - 1);
-      value = mean[k];
+      const { min, max, mean } = this._columns.bins;
+      const value = mean[k];
       if (value !== value) return;
       text =
         max[k] - min[k] > Math.abs(value) * 0.02
           ? `${fmt.current(min[k], 3)} … ${fmt.current(max[k], 3)}`
           : fmt.current(value);
+      markY = ymap(value);
     }
     const t = fmt.duration(this._time(raw ? Math.round(idx) : idx), 6);
     ctx.strokeStyle = c.cursor;
@@ -794,9 +965,9 @@ export class Chart {
     ctx.lineTo(Math.round(h.x) + 0.5, bottom);
     ctx.stroke();
     ctx.globalAlpha = 1;
-    ctx.fillStyle = c.trace;
+    ctx.fillStyle = main === 'current' ? c.trace : c.digital;
     ctx.beginPath();
-    ctx.arc(h.x, ymap(value), 3.5, 0, Math.PI * 2);
+    ctx.arc(h.x, markY, 3.5, 0, Math.PI * 2);
     ctx.fill();
     const label = `${text}   ${t}`;
     const tw = ctx.measureText(label).width + 16;
@@ -827,31 +998,30 @@ export class Chart {
     el.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       const p = pos(e);
-      const { plot } = this.layout();
+      const { plot, band } = this.layout();
       el.setPointerCapture(e.pointerId);
       el.focus({ preventScroll: true });
-      if (p.x < plot.x) {
-        this.yAuto = false;
-        this._drag = { kind: 'y', y: p.y, domain: this._yDomain(), plot };
+      const lane = this._laneAt(p.y, band)?.key;
+      if (p.x < plot.x && lane === undefined) {
+        // Dragging the current axis rescales it.
+        if (this.mainSignal === 'current') {
+          this.yAuto = false;
+          this._drag = { kind: 'y', y: p.y, domain: this._yDomain(), plot };
+        }
         return;
       }
-      if ((this.tool === 'select') !== e.shiftKey) {
-        const i = this._clampIndex(this.indexAtX(p.x));
-        this._drag = { kind: 'select', anchor: i, x: p.x };
-        this.selection = { a: i, b: i };
-      } else {
-        this.viewStart = this.visibleRange()[0];
-        this.live = false;
-        this._drag = { kind: 'pan', x: p.x, start: this.viewStart, plot };
-        this.onviewchange?.();
-      }
-      this.invalidate();
+      // Nothing starts until the pointer moves: a click picks a lane (or clears the selection),
+      // a drag pans or selects.
+      const select = (this.tool === 'select') !== e.shiftKey;
+      this._drag = { kind: 'press', x: p.x, lane, select, plot };
     });
 
     el.addEventListener('pointermove', (e) => {
       const p = pos(e);
       this.hover = p;
-      const d = this._drag;
+      el.style.cursor = this._laneAt(p.y, this.layout().band) ? 'pointer' : '';
+      let d = this._drag;
+      if (d?.kind === 'press' && Math.abs(p.x - d.x) >= 3) d = this._drag = this._startDrag(d);
       if (d?.kind === 'pan') {
         this.viewStart = d.start - ((p.x - d.x) / d.plot.w) * this.viewSpan;
         this._clampView();
@@ -870,12 +1040,14 @@ export class Chart {
       this.invalidate();
     });
 
-    const end = (e) => {
+    const end = () => {
       const d = this._drag;
       this._drag = null;
-      if (d?.kind === 'select') {
-        if (Math.abs(pos(e).x - d.x) < 3) this.clearSelection();
-        else this.onselect?.(this.selection);
+      if (d?.kind === 'press') {
+        if (d.lane !== undefined) this.setMain(d.lane);
+        else if (d.select) this.clearSelection();
+      } else if (d?.kind === 'select') {
+        this.onselect?.(this.selection);
       }
       this.invalidate();
     };
@@ -895,7 +1067,9 @@ export class Chart {
         const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
         const dy = e.deltaY * unit;
         const dx = e.deltaX * unit;
-        if (p.x < plot.x) this._zoomY(Math.exp(dy * 0.002), (plot.y + plot.h - p.y) / plot.h);
+        if (p.x < plot.x) {
+          if (this.mainSignal === 'current') this._zoomY(Math.exp(dy * 0.002), (plot.y + plot.h - p.y) / plot.h);
+        }
         else if (Math.abs(dx) > Math.abs(dy)) this.pan(dx / plot.w);
         else this.zoom(Math.exp(dy * 0.002), (p.x - plot.x) / plot.w);
         this.invalidate();
@@ -904,7 +1078,10 @@ export class Chart {
     );
 
     el.addEventListener('dblclick', (e) => {
-      if (pos(e).x < this.layout().plot.x) this.yAuto = true;
+      const p = pos(e);
+      const { plot, band } = this.layout();
+      if (this._laneAt(p.y, band)) return; // lane clicks swap signals
+      if (p.x < plot.x) this.yAuto = true;
       else this.clearSelection();
       this.invalidate();
     });
@@ -926,6 +1103,20 @@ export class Chart {
         fn();
       }
     });
+  }
+
+  /** Turn a press that has started moving into a pan or a selection, anchored where it began. */
+  _startDrag({ x, select, plot }) {
+    if (select) {
+      const i = this._clampIndex(this.indexAtX(x));
+      this.selection = { a: i, b: i };
+      return { kind: 'select', anchor: i, x };
+    }
+    const start = this.visibleRange()[0];
+    this.viewStart = start;
+    this.live = false;
+    this.onviewchange?.();
+    return { kind: 'pan', x, start, plot };
   }
 
   /** Zoom the current axis around the point `frac` of the way up the plot. */

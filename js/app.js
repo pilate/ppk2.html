@@ -27,6 +27,7 @@ const DEFAULTS = {
   showDigital: true,
   channels: 0xff,
   spanSec: 4,
+  main: 'current', // signal in the big chart: 'current' or a digital channel number
   tool: 'pan',
   csvDigital: true,
 };
@@ -83,7 +84,12 @@ chart.configure({
   yLog: settings.yLog,
   showDigital: settings.showDigital,
   channels: settings.channels,
+  main: Number.isInteger(settings.main) && settings.main >= 0 && settings.main < DIGITAL_CHANNELS ? settings.main : 'current',
 });
+chart.onmainchange = (main) => {
+  settings.main = main;
+  saveSettings();
+};
 
 // ---- helpers --------------------------------------------------------------
 
