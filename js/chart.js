@@ -4,7 +4,7 @@ import * as fmt from './format.js';
 import { DIGITAL_CHANNELS, clamp } from './protocol.js';
 import { Agg } from './store.js';
 
-const AXIS_W = 76;
+const AXIS_PAD = 12; // left of the widest axis label; labels sit 8 px from the plot
 const RIGHT_PAD = 16;
 const TIME_AXIS_H = 30; // time labels, above the plot
 const BOTTOM_PAD = 10; // below the plot when the lanes are hidden (room for its lowest label)
@@ -139,6 +139,8 @@ export class Chart {
 
     this._columns = new BinCache(); // one bin per device pixel column
     this._raw = { v: new Float64Array(0), b: new Uint8Array(0), from: 0, n: 0 };
+    this._axisW = 56; // label column left of the plot, sized to the widest label drawn
+    this._labelW = 0;
     this._liveEnd = 0; // right edge of the live view, advanced smoothly by the clock
     this._seenEnd = -1;
     this._lastGrowth = 0;
@@ -333,9 +335,9 @@ export class Chart {
     // The band, when shown, runs to the bottom edge of the chart.
     const below = lanes.length ? LANE_GAP + lanesH + BAND_PAD : BOTTOM_PAD;
     const plot = {
-      x: AXIS_W,
+      x: this._axisW,
       y: TIME_AXIS_H,
-      w: Math.max(10, this.cssW - AXIS_W - RIGHT_PAD),
+      w: Math.max(10, this.cssW - this._axisW - RIGHT_PAD),
       h: Math.max(40, this.cssH - TIME_AXIS_H - below),
     };
     const band = { x: plot.x, y: plot.y + plot.h + LANE_GAP, w: plot.w, h: lanesH, lanes };
@@ -567,6 +569,26 @@ export class Chart {
     if (band.lanes.length) this._drawLanes(f, main);
     this._drawOverlays(f);
     this._drawHover(f, main);
+    this._fitAxisColumn();
+  }
+
+  /** A label in the column left of the plot (right-aligned); remembers the widest for sizing it. */
+  _axisLabel(text, plot, y) {
+    this._labelW = Math.max(this._labelW, this.ctx.measureText(text).width);
+    this.ctx.fillText(text, plot.x - 8, y);
+  }
+
+  /**
+   * Size the label column to the widest label drawn this frame. It grows at once but only
+   * shrinks when that saves more than 12 px, so auto-scaling doesn't nudge the plot sideways.
+   */
+  _fitAxisColumn() {
+    const need = Math.ceil(this._labelW) + 8 + AXIS_PAD;
+    this._labelW = 0;
+    if (need > this._axisW || need < this._axisW - 12) {
+      this._axisW = need;
+      this.invalidate();
+    }
   }
 
   _drawYGrid({ plot, ymap }) {
@@ -596,7 +618,7 @@ export class Chart {
       ctx.moveTo(plot.x, y);
       ctx.lineTo(plot.x + plot.w, y);
       ctx.stroke();
-      ctx.fillText(label(v), plot.x - 8, y);
+      this._axisLabel(label(v), plot, y);
     }
   }
 
@@ -755,7 +777,7 @@ export class Chart {
         ctx.fillRect(0, top + 2, 3, h - 4);
       }
       ctx.fillStyle = isMain ? c.trace : c.axis;
-      ctx.fillText(lane.label, d.x - 8, top + h / 2);
+      this._axisLabel(lane.label, d, top + h / 2);
       if (!hasData) return;
       if (key === 'current') this._drawCurrentLane(f, lane);
       else this._drawLogic(f, key, top + 4.5, top + h - 3.5, 0.3);
@@ -805,8 +827,8 @@ export class Chart {
     ctx.fillStyle = c.axis;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText('High', plot.x - 8, hiY);
-    ctx.fillText('Low', plot.x - 8, loY);
+    this._axisLabel('High', plot, hiY);
+    this._axisLabel('Low', plot, loY);
   }
 
   /** Name tag in the plot's top-left corner: a legend glyph in the signal's colour and its name. */
