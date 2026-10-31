@@ -563,12 +563,6 @@ details.panel[open] > summary::after {
   display: inline-grid;
 }
 
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
 /* A setting: label on the left, control in a fixed-width column on the right. */
 .row {
   display: grid;
@@ -616,6 +610,43 @@ details.panel[open] > summary::after {
   color: var(--muted);
 }
 
+/* A number with − and + buttons inside the same box. */
+.stepper .step {
+  flex: none;
+  width: 26px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  touch-action: manipulation;
+}
+
+.stepper .step:first-child {
+  border-right: 1px solid var(--rule-soft);
+}
+
+.stepper .step:last-child {
+  border-left: 1px solid var(--rule-soft);
+}
+
+.stepper .step:hover {
+  background: var(--btn-hover);
+  color: var(--ink);
+}
+
+.stepper input {
+  padding-left: 4px;
+}
+
+.stepper .unit {
+  padding-right: 6px;
+}
+
 .box select {
   height: 100%;
   padding: 0 24px 0 8px;
@@ -645,11 +676,6 @@ select {
   appearance: none;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
-}
-
-input[type='range'] {
-  width: 100%;
-  accent-color: var(--trace);
 }
 
 /* Switch rows: label on the left, switch on the right edge of the control column. */

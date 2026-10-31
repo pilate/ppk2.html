@@ -222,7 +222,7 @@ function renderDevice() {
   ]);
   $('uncalibrated').hidden = meta.hasCalibration;
   modeSeg.set(device.mode);
-  setVddInputs(device.vdd);
+  $('vdd-num').value = device.vdd;
   $('dut-power').checked = device.dutPower;
 
   // Range gains
@@ -332,21 +332,34 @@ const modeSeg = segmented('mode', PowerMode.Source, (v) =>
   }),
 );
 
-function setVddInputs(mV) {
-  $('vdd').value = mV;
-  $('vdd-num').value = mV;
-}
-
 async function applyVdd(mV) {
   const v = clampVdd(mV);
-  setVddInputs(v);
+  $('vdd-num').value = v;
   if (device?.mode !== PowerMode.Source) return;
   await device.setVdd(v);
   if (isRecording()) session.info.vdd = v;
 }
 
-$('vdd').addEventListener('input', () => ($('vdd-num').value = $('vdd').value));
-$('vdd').addEventListener('change', () => guarded(() => applyVdd(Number($('vdd').value))));
+// Steppers: − and + either side of a number box. A click steps once; holding repeats.
+for (const btn of document.querySelectorAll('.step')) {
+  const input = btn.parentElement.querySelector('input');
+  const step = () => {
+    input.value = clamp((Number(input.value) || 0) + Number(btn.dataset.step), Number(input.min), Number(input.max));
+    input.dispatchEvent(new Event('change'));
+  };
+  let timer = 0;
+  const stop = () => clearTimeout(timer);
+  btn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    step();
+    timer = setTimeout(function repeat() {
+      step();
+      timer = setTimeout(repeat, 75);
+    }, 400);
+  });
+  for (const type of ['pointerup', 'pointerleave', 'pointercancel']) btn.addEventListener(type, stop);
+  btn.addEventListener('click', (e) => e.detail === 0 && step()); // keyboard (Enter or Space)
+}
 $('vdd-num').addEventListener('change', () => guarded(() => applyVdd(Number($('vdd-num').value) || 3000)));
 $('dut-power').addEventListener('change', () => guarded(() => device?.setDutPower($('dut-power').checked)));
 
@@ -565,6 +578,23 @@ document.addEventListener('keydown', (e) => {
   if (['INPUT', 'SELECT', 'BUTTON', 'TEXTAREA', 'SUMMARY'].includes(e.target.tagName)) return;
   e.preventDefault();
   guarded(() => (isRecording() ? endRecording() : startRecording()));
+});
+
+// Number boxes take digits only, plus a decimal point where the step allows fractions (no
+// settings are negative, and "e" for exponents isn't wanted). Applies to boxes added later too.
+const numberBox = (el) => el instanceof HTMLInputElement && el.type === 'number';
+const allowsFraction = (el) => el.step === 'any' || !Number.isInteger(Number(el.step || 1));
+document.addEventListener('focusin', (e) => {
+  if (numberBox(e.target)) e.target.inputMode = allowsFraction(e.target) ? 'decimal' : 'numeric';
+});
+document.addEventListener('keydown', (e) => {
+  if (!numberBox(e.target) || e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!/\d/.test(e.key) && !(e.key === '.' && allowsFraction(e.target))) e.preventDefault();
+});
+document.addEventListener('paste', (e) => {
+  if (!numberBox(e.target)) return;
+  const text = e.clipboardData.getData('text').trim();
+  if (!(allowsFraction(e.target) ? /^\d*\.?\d*$/ : /^\d*$/).test(text)) e.preventDefault();
 });
 
 // Hints: a click only focuses the "?" (so it doesn't toggle a section it sits in); Escape closes it.

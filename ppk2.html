@@ -59,12 +59,14 @@
             <button type="button" role="radio" data-value="2">Source meter</button>
             <button type="button" role="radio" data-value="1">Ammeter</button>
           </div>
-          <div class="field" id="vdd-field">
-            <div class="row">
-              <label for="vdd-num">Supply voltage</label>
-              <span class="box"><input id="vdd-num" type="number" min="800" max="5000" step="10" /><span class="unit">mV</span></span>
-            </div>
-            <input id="vdd" type="range" min="800" max="5000" step="10" aria-label="Supply voltage" />
+          <div class="row" id="vdd-field">
+            <label for="vdd-num">Supply voltage</label>
+            <span class="box stepper">
+              <button class="step" type="button" data-step="-100" aria-label="Lower by 100 mV">−</button>
+              <input id="vdd-num" type="number" min="800" max="5000" step="10" />
+              <span class="unit">mV</span>
+              <button class="step" type="button" data-step="100" aria-label="Raise by 100 mV">+</button>
+            </span>
           </div>
           <label class="row toggle">
             <span>Enable power output</span>
