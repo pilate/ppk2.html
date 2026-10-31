@@ -101,7 +101,8 @@ async function connect(makeTransport) {
     dev.setSpikeFilter(settings.spike);
     await dev.setMode(dev.mode);
     if (dev.mode === PowerMode.Source) await dev.setVdd(dev.vdd);
-    await dev.setDutPower(false);
+    // A real PPK2 starts with VOUT off so nothing gets powered by surprise; the simulated one has nothing to protect.
+    await dev.setDutPower(transport instanceof DemoTransport);
     device = dev;
     renderDevice();
   } catch (e) {
@@ -660,10 +661,7 @@ window.ppk2 = {
 if (new URLSearchParams(location.search).has('demo')) {
   connect(async () => new DemoTransport()).then(() =>
     guarded(async () => {
-      if (!device) return;
-      await device.setDutPower(true);
-      $('dut-power').checked = true;
-      await startRecording();
+      if (device) await startRecording();
     }),
   );
 }
