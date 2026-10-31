@@ -17,6 +17,7 @@ export const DEFAULTS = {
   main: 'current', // signal in the big chart: 'current' or a digital channel number
   tool: 'pan',
   csvDigital: true,
+  sideHidden: false,
 };
 
 const KEY = 'ppk2.html.settings.v2';

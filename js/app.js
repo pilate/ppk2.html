@@ -267,7 +267,23 @@ $('dut-power').addEventListener('change', () =>
 $('btn-connect').addEventListener('click', () => connect(connectSerial));
 $('btn-demo').addEventListener('click', () => connect(async () => new DemoTransport()));
 $('btn-disconnect').addEventListener('click', () => guarded(disconnect));
-$('btn-start').addEventListener('click', () => guarded(() => (isRecording() ? endRecording() : startRecording())));
+for (const btn of document.querySelectorAll('.start-btn')) {
+  btn.addEventListener('click', () => guarded(() => (isRecording() ? endRecording() : startRecording())));
+}
+
+function showSide(show) {
+  document.body.classList.toggle('side-hidden', !show);
+  const btn = $('btn-side');
+  btn.setAttribute('aria-expanded', String(show));
+  btn.title = show ? 'Hide the settings' : 'Show the settings';
+  btn.setAttribute('aria-label', btn.title);
+}
+showSide(!settings.sideHidden);
+$('btn-side').addEventListener('click', () => {
+  settings.sideHidden = !settings.sideHidden;
+  save();
+  showSide(!settings.sideHidden);
+});
 
 // Sample rate, duration and memory
 for (const rate of SAMPLE_RATES) $('rate').add(new Option(fmt.rateLabel(rate), String(rate)));
@@ -521,10 +537,11 @@ function syncUI() {
   $('vdd-field').hidden = connected && device.mode !== PowerMode.Source;
   modeSeg.disable(recording);
 
-  const start = $('btn-start');
-  setText(start, recording ? 'Stop' : settings.trigger.enabled ? 'Start and wait for trigger' : 'Start');
-  start.dataset.running = String(recording);
-  start.disabled = !connected;
+  for (const start of document.querySelectorAll('.start-btn')) {
+    setText(start, recording ? 'Stop' : settings.trigger.enabled ? 'Start and wait for trigger' : 'Start');
+    start.dataset.running = String(recording);
+    start.disabled = !connected;
+  }
   $('rate').disabled = recording;
 
   const hasData = !!session.store?.length;

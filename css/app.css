@@ -147,6 +147,13 @@ select {
   text-overflow: ellipsis;
 }
 
+.topbar-end {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
 .conn {
   display: flex;
   align-items: center;
@@ -190,6 +197,16 @@ select {
   display: grid;
   grid-template-columns: 308px minmax(0, 1fr);
   height: calc(100% - 52px);
+}
+
+/* The sidebar can be hidden to give the chart the whole width. */
+.side-hidden .layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.side-hidden .side,
+body:not(.side-hidden) #btn-start-top {
+  display: none;
 }
 
 .side {
@@ -476,7 +493,8 @@ details.panel[open] > summary::after {
   font-weight: 600;
 }
 
-.btn.big[data-running='true'] {
+.start-btn[data-running='true'],
+.start-btn[data-running='true']:hover:not(:disabled) {
   background: var(--trigger);
   border-color: var(--trigger);
 }
