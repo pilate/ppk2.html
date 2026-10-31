@@ -676,7 +676,7 @@ input[type='range'] {
 
 .readouts {
   display: grid;
-  grid-template-columns: minmax(250px, 1.2fr) 1fr 1fr;
+  grid-template-columns: minmax(220px, auto) minmax(0, 1fr);
   border: 1px solid var(--rule);
   border-radius: 8px;
   background: var(--plot-bg);
@@ -687,12 +687,15 @@ input[type='range'] {
   border-left: 1px solid var(--rule-soft);
 }
 
+/* Centred, so it sits beside both rows when a selection makes the bar taller. */
 .meter {
-  padding: 12px 18px 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 5px 22px 9px 18px; /* the label's line spacing adds room above, so less padding there */
 }
 
-.meter-label,
-.stats-head {
+.meter-label {
   color: var(--muted);
   font-size: 14px;
   font-weight: 500;
@@ -709,13 +712,13 @@ input[type='range'] {
 }
 
 #meter-num {
-  font-size: 54px;
+  font-size: 40px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 
 #meter-unit {
-  font-size: 26px;
+  font-size: 21px;
   font-weight: 500;
   color: var(--muted);
 }
@@ -725,45 +728,79 @@ input[type='range'] {
 }
 
 .meter-sub {
-  margin-top: 6px;
+  margin-top: 4px;
+  max-width: 260px;
   color: var(--muted);
   font-size: 14px;
-  font-variant-numeric: tabular-nums;
 }
 
+.meter-sub:empty {
+  display: none;
+}
+
+/* Window and selection figures: one row each, measurements as columns. */
 .stats {
-  padding: 12px 18px;
   min-width: 0;
+  padding: 10px 18px 6px; /* less below: the last row's cell padding adds to it */
+  overflow-x: auto;
 }
 
-.stats dl {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 1px 14px;
-  margin: 6px 0 0;
-}
-
-.stats dt {
-  color: var(--muted);
-}
-
-.stats dd {
-  margin: 0;
-  text-align: right;
-  font-family: var(--display);
-  font-size: 17px;
-  font-weight: 500;
+/* Fixed layout keeps columns still as values change; separate borders so a hidden row hides its rule too. */
+.stats-table {
+  width: 100%;
+  min-width: 540px;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-#stats-sel-wrap dd {
+.stats-table thead td {
+  width: 150px;
+}
+
+.stats-table thead th {
+  padding: 0 0 3px 18px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: right;
+}
+
+.stats-table tbody th,
+.stats-table tbody td {
+  padding: 5px 0 5px 18px;
+  border-top: 1px solid var(--rule-soft);
+}
+
+.stats-table tbody th {
+  padding-left: 0;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.stats-table tbody td {
+  font-family: var(--display);
+  font-size: 18px;
+  font-weight: 500;
+  text-align: right;
+}
+
+.stats-table .selection th,
+.stats-table .selection td {
   color: var(--select);
 }
 
-.stats-empty {
-  margin: 8px 0 0;
+.stats-table .duration {
+  margin-left: 4px;
   color: var(--muted);
-  font-size: 14px;
+  font-weight: 400;
+}
+
+.stats-table.no-energy .energy {
+  display: none;
 }
 
 /* ---- chart ---------------------------------------------------------------- */
@@ -892,14 +929,11 @@ kbd {
 
 @media (max-width: 1100px) {
   .readouts {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
   }
-  .meter {
-    grid-column: 1 / -1;
-    border-bottom: 1px solid var(--rule-soft);
-  }
-  .readouts > .stats:first-of-type {
+  .readouts > * + * {
     border-left: 0;
+    border-top: 1px solid var(--rule-soft);
   }
 }
 
@@ -921,13 +955,6 @@ kbd {
   }
   .brand-sub {
     display: none;
-  }
-  .readouts {
-    grid-template-columns: 1fr;
-  }
-  .readouts > * + * {
-    border-left: 0;
-    border-top: 1px solid var(--rule-soft);
   }
 }
 

@@ -212,16 +212,22 @@
           <div class="meter" id="meter" data-state="idle">
             <div class="meter-label" id="meter-label">Live average</div>
             <div class="meter-value"><span id="meter-num">—</span><span id="meter-unit">A</span></div>
-            <div class="meter-sub" id="meter-sub">Connect a PPK2 and press Start</div>
+            <div class="meter-sub" id="meter-sub"></div>
           </div>
           <div class="stats">
-            <div class="stats-head">Visible window</div>
-            <dl id="stats-window"></dl>
-          </div>
-          <div class="stats" id="stats-sel-wrap">
-            <div class="stats-head">Selection</div>
-            <dl id="stats-sel"></dl>
-            <p class="stats-empty" id="stats-sel-empty">Hold Shift and drag across the chart, or switch to Select.</p>
+            <table class="stats-table" id="stats">
+              <thead>
+                <tr>
+                  <td></td>
+                  <th scope="col">Average</th>
+                  <th scope="col">Min</th>
+                  <th scope="col">Max</th>
+                  <th scope="col">Charge</th>
+                  <th scope="col" class="energy">Energy</th>
+                </tr>
+              </thead>
+              <tbody id="stats-body"></tbody>
+            </table>
           </div>
         </section>
 

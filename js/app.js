@@ -13,7 +13,10 @@ const $ = (id) => document.getElementById(id);
 
 // ---- settings -------------------------------------------------------------
 
-const SETTINGS_KEY = 'ppk2.html.settings.v1';
+// Only settings that differ from the defaults are stored, so changing a default reaches
+// everyone who hasn't picked their own value.
+const SETTINGS_KEY = 'ppk2.html.settings.v2';
+const OLD_SETTINGS_KEY = 'ppk2.html.settings.v1'; // stored every setting, defaults included
 const DEFAULTS = {
   rate: 100_000,
   limit: 0,
@@ -23,7 +26,7 @@ const DEFAULTS = {
   yLog: false,
   showDigital: true,
   channels: 0xff,
-  spanSec: 1,
+  spanSec: 4,
   tool: 'pan',
   csvDigital: true,
 };
@@ -31,7 +34,12 @@ const DEFAULTS = {
 function loadSettings() {
   const s = structuredClone(DEFAULTS);
   try {
-    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    let saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null');
+    if (!saved) {
+      saved = JSON.parse(localStorage.getItem(OLD_SETTINGS_KEY) || '{}');
+      // The old format can't tell a chosen 1 s window from the old default, so let the new default apply.
+      if (saved.spanSec === 1) delete saved.spanSec;
+    }
     for (const [k, v] of Object.entries(saved)) {
       if (!(k in s)) continue;
       s[k] = typeof s[k] === 'object' ? { ...s[k], ...v } : v;
@@ -43,8 +51,13 @@ function loadSettings() {
 const settings = loadSettings();
 
 function saveSettings() {
+  const changed = {};
+  for (const [k, v] of Object.entries(settings)) {
+    if (JSON.stringify(v) !== JSON.stringify(DEFAULTS[k])) changed[k] = v;
+  }
   try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(changed));
+    localStorage.removeItem(OLD_SETTINGS_KEY);
   } catch {}
 }
 
@@ -444,7 +457,7 @@ segmented('tool', settings.tool, (v) => {
   chart.configure({ tool: v });
   saveSettings();
 });
-const SPANS = [0.001, 0.01, 0.1, 0.5, 1, 3, 10, 30, 60, 300, 600, 1800, 3600];
+const SPANS = [0.001, 0.01, 0.1, 0.5, 1, 4, 10, 30, 60, 300, 600, 1800, 3600];
 const spanSelect = $('span');
 const customSpan = new Option('', 'custom');
 customSpan.hidden = true;
@@ -635,6 +648,7 @@ function syncUI() {
 }
 
 let statsQueued = false;
+let selectionRowShown = false;
 function requestStats() {
   if (statsQueued) return;
   statsQueued = true;
@@ -644,19 +658,34 @@ function requestStats() {
   });
 }
 
-function statsRows(store, from, to) {
-  const agg = store.aggregate(from, to);
-  if (!agg.n) return null;
-  const chargeUC = agg.sum / store.sampleRate;
-  const rows = [
-    ['Average', fmt.current(agg.mean)],
-    ['Max', fmt.current(agg.validMax)],
-    ['Time', fmt.duration(agg.n / store.sampleRate)],
-    ['Charge', fmt.charge(chargeUC)],
-  ];
+/** Supply voltage in volts when the recording's energy can be worked out (source meter mode). */
+function energyVolts() {
   const { mode, vdd } = session.info ?? {};
-  if (mode === PowerMode.Source && vdd) rows.push(['Energy', fmt.energy(chargeUC * (vdd / 1000))]);
-  return rows;
+  return mode === PowerMode.Source && vdd ? vdd / 1000 : null;
+}
+
+/**
+ * One table row: Average, Min, Max, Charge, Energy for samples [from, to). The window's length
+ * is in the toolbar; a selection's goes next to its label.
+ */
+function statsRow(label, className, store, from, to, showDuration = false) {
+  const agg = store?.aggregate(from, to);
+  let cells = ['—', '—', '—', '—', '—'];
+  let duration = '';
+  if (agg?.n) {
+    const chargeUC = agg.sum / store.sampleRate;
+    const volts = energyVolts();
+    cells = [
+      fmt.current(agg.mean),
+      fmt.current(agg.validMin),
+      fmt.current(agg.validMax),
+      fmt.charge(chargeUC),
+      volts ? fmt.energy(chargeUC * volts) : '—',
+    ];
+    if (showDuration) duration = ` <span class="duration">${escapeHtml(fmt.duration(agg.n / store.sampleRate, 3))}</span>`;
+  }
+  const tds = cells.map((v, i) => `<td${i === 4 ? ' class="energy"' : ''}>${escapeHtml(v)}</td>`).join('');
+  return `<tr class="${className}"><th scope="row">${label}${duration}</th>${tds}</tr>`;
 }
 
 function updateStats() {
@@ -674,9 +703,7 @@ function updateStats() {
       $('meter-sub'),
       device.mode === PowerMode.Source && !device.dutPower
         ? 'Power output is off. Turn on Enable power output to power your device.'
-        : agg.cnt
-          ? `Peak ${fmt.current(agg.max)} over the last 0.5 s`
-          : 'No data in the last 0.5 s',
+        : '',
     );
     setText($('meter-label'), 'Live average');
     meter.dataset.state = 'live';
@@ -697,13 +724,17 @@ function updateStats() {
     );
   }
 
-  // Window and selection
+  // Window and selection. The selection row comes and goes only when no drag is in progress,
+  // so the bar never changes height (and moves the chart) under the pointer.
   const [from, to] = chart.visibleRange();
-  const win = store ? statsRows(store, from, to) : null;
-  setHTML($('stats-window'), definitionList(win ?? [['Average', '—'], ['Max', '—'], ['Time', '—'], ['Charge', '—']]));
-  const sel = chart.selection && store ? statsRows(store, chart.selection.a, chart.selection.b) : null;
-  setHTML($('stats-sel'), sel ? definitionList(sel) : '');
-  $('stats-sel-empty').hidden = !!sel;
+  const sel = store ? chart.selection : null;
+  if (!chart.selecting) selectionRowShown = !!sel;
+  setHTML(
+    $('stats-body'),
+    statsRow('Window', 'window', store, from, to) +
+      (selectionRowShown ? statsRow('Selection', 'selection', store, sel?.a, sel?.b, true) : ''),
+  );
+  $('stats').classList.toggle('no-energy', !energyVolts());
   $('btn-csv-sel').disabled = !sel || recording || busy;
 
   // Toolbar

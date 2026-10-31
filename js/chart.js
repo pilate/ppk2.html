@@ -272,6 +272,11 @@ export class Chart {
     return [from, from + this.viewSpan];
   }
 
+  /** True while the user is dragging out a selection. */
+  get selecting() {
+    return this._drag?.kind === 'select';
+  }
+
   clearSelection() {
     if (!this.selection) return;
     this.selection = null;
