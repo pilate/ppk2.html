@@ -8,7 +8,9 @@ Not affiliated with or endorsed by Nordic Semiconductor.
 
 ## Use it
 
-Build the single-file app, then open it in Chrome or Edge on a desktop computer (Web Serial is Chromium-only):
+Build the single-file app, then open it in a desktop browser. Connecting a PPK2 needs Web Serial: Chrome and
+Edge have it, and recent Firefox versions expose it too. Without it you can still open, view, save and export
+recordings, and use the simulated device.
 
 ```sh
 python3 build.py          # writes dist/ppk2.html
@@ -47,7 +49,7 @@ Windows, where the browser can see it. Run `python3 build.py` again to refresh `
 | **Digital** | D0–D7 logic lanes, each one can be shown or hidden |
 | **Measure** | Average, max, duration, charge and energy for both the visible window and a selected range; live average and peak |
 | **Trigger** | Rising or falling edge at a current level, capture length, pre-trigger percentage, single or continuous |
-| **Files** | Save and reopen recordings (`.wppk2`); export everything or the selection as CSV with the same columns as nRF Connect; save the chart as PNG |
+| **Files** | Save and open recordings as `.ppk2`, the same format as nRF Connect, so files open in either app; export everything or the selection as CSV with the same columns as nRF Connect; save the chart as PNG |
 | **Advanced** | Spike-filter tuning, per-range gain adjustment (stored on the PPK2), calibration data viewer, memory limit |
 | **Robustness** | Detects lost samples from the PPK2's sample counter and marks them as gaps; realigns the stream automatically after USB buffer overruns |
 
@@ -66,7 +68,9 @@ js/protocol.js               command bytes, metadata parser, sample decoder and 
 js/recorder.js               downsampling, stop-after limit, software trigger
 js/store.js                  chunked sample storage with a min/max/sum pyramid
 js/chart.js                  canvas chart and overview strip
-js/fileio.js                 session files, CSV, PNG
+js/ppk2file.js               the .ppk2 recording format (nRF Connect compatible)
+js/fileio.js                 save dialog / download, .ppk2 save and open, CSV, PNG
+js/zip.js                    ZIP reading and writing with the browser's deflate
 js/format.js                 SI-prefixed number formatting and axis ticks
 tests/                       unit, end-to-end and file-format tests (Node 20+)
 ```
@@ -83,10 +87,13 @@ of 16, 256, 4 096 and 65 536 samples, so drawing a pixel column or computing sta
 roughly a hundred values, however long the recording. Memory use is about 6.4 bytes per sample (512 MB holds
 about 14 minutes at 100 kHz); when the limit is reached the oldest data is dropped.
 
-**Session file format** (`.wppk2`, little-endian): magic `WPPK2SES`, `uint32` version, `uint32` header
-length, JSON header (sample rate, count, time offset, mode, supply voltage, start time), padding to 4 bytes,
-then `float32` current in µA for every sample (NaN marks lost samples), then one `uint8` of digital bits per
-sample.
+**Recording files** use nRF Connect's `.ppk2` format: a ZIP archive (deflate, ZIP64 past 4 GiB) with
+`metadata.json` (`{ metadata: { samplesPerSecond, startSystemTime }, formatVersion: 2 }`, plus a `ppk2html`
+object with mode, supply voltage, source device and time offset that nRF Connect ignores), `minimap.raw` (the JSON overview
+nRF Connect needs to open a file, built with a port of its folding algorithm) and `session.raw` (6 bytes per
+sample: little-endian `float32` current in µA, NaN for lost samples, then a big-endian `uint16` with 2 bits per
+digital channel: `01` low, `10` high, `11` toggled within the sample). The ZIP code (`js/zip.js`) uses the
+browser's built-in deflate, so saving and opening work in Firefox too, where files save as downloads.
 
 From the browser console, `ppk2.chart`, `ppk2.recorder`, `ppk2.device` and `ppk2.session` give access to the live
 objects.
@@ -103,6 +110,6 @@ the trigger, session save/load and CSV export, and an end-to-end run against the
 
 ## Not yet supported
 
-- Opening `.ppk2` files saved by nRF Connect
+- Opening the older `.ppk` files from nRF Connect versions before `.ppk2`
 - Streaming very long recordings straight to disk (the recording lives in memory, up to the limit you set)
 - Firmware update of the PPK2 (use nRF Connect)

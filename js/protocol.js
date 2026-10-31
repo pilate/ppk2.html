@@ -15,6 +15,7 @@ export const SAMPLE_RATE = 100_000;
 export const VDD_MIN = 800;
 export const VDD_MAX = 5000;
 export const RANGE_COUNT = 5;
+export const DIGITAL_CHANNELS = 8;
 
 // The commands Nordic's app sends to a PPK2. Its source and the IRNAS Python
 // library define more opcodes (trigger, range, LCD, spike filter, ...), but

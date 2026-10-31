@@ -4,7 +4,7 @@ import { Chart, Minimap } from './chart.js';
 import * as files from './fileio.js';
 import * as fmt from './format.js';
 import { Ppk2Device } from './ppk2.js';
-import { DEFAULT_SPIKE_FILTER, MODIFIER_FIELDS, PowerMode, RANGE_COUNT, clamp, clampVdd } from './protocol.js';
+import { DEFAULT_SPIKE_FILTER, DIGITAL_CHANNELS, MODIFIER_FIELDS, PowerMode, RANGE_COUNT, clamp, clampVdd } from './protocol.js';
 import { Recorder, SAMPLE_RATES } from './recorder.js';
 import { SampleStore } from './store.js';
 import { DemoTransport, SerialTransport } from './transport.js';
@@ -57,7 +57,7 @@ const recorder = new Recorder();
 let device = null;
 let connecting = false;
 let busy = false; // a file operation is running
-/** The recording on screen: its samples, header info ({ startedAt, mode, vdd, source }) and save state. */
+/** The recording on screen: its samples, recording details ({ startedAt, mode, vdd, source }) and save state. */
 let session = { store: null, info: null, unsaved: false };
 
 const isRecording = () => !!device?.sampling;
@@ -403,7 +403,7 @@ $('show-digital').addEventListener('change', () => {
   chart.configure({ showDigital: settings.showDigital });
   saveSettings();
 });
-for (let ch = 0; ch < 8; ch++) {
+for (let ch = 0; ch < DIGITAL_CHANNELS; ch++) {
   const b = document.createElement('button');
   b.type = 'button';
   b.textContent = `D${ch}`;
@@ -512,9 +512,8 @@ $('file-open').addEventListener('change', () => {
   $('file-open').value = '';
   if (!file) return;
   fileTask('Opening', async (progress) => {
-    const { store, header } = await files.loadSession(file, settings.buffer, progress);
-    const { startedAt, mode, vdd, source } = header;
-    session = { store, info: { startedAt, mode, vdd, source }, unsaved: false };
+    const { store, info } = await files.loadSession(file, progress);
+    session = { store, info, unsaved: false };
     chart.setStore(store);
     chart.yAuto = true;
     chart.fitAll();

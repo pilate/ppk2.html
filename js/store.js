@@ -151,34 +151,39 @@ export class SampleStore {
     return chunk;
   }
 
+  _tail() {
+    const chunk = this.chunks[this.chunks.length - 1];
+    return chunk && chunk.len < CHUNK_SIZE ? chunk : this._nextChunk();
+  }
+
   append(value, bits) {
-    let chunk = this.chunks[this.chunks.length - 1];
-    if (!chunk || chunk.len === CHUNK_SIZE) chunk = this._nextChunk();
+    const chunk = this._tail();
     const i = chunk.len++;
     chunk.cur[i] = value;
     chunk.bits[i] = bits;
-
-    // Only the finest level is updated per sample; a coarser bucket is filled
-    // in when the finer bucket below it completes. Readers only use complete
-    // buckets, so partial coarse buckets are never seen.
-    const levels = chunk.levels;
-    const L = levels[1];
-    const j = i >> 4;
-    if (value === value) {
-      if (value < L.min[j]) L.min[j] = value;
-      if (value > L.max[j]) L.max[j] = value;
-      L.sum[j] += value;
-      L.cnt[j]++;
-    }
-    L.or[j] |= bits;
-    L.and[j] &= bits;
-    for (let k = 2; k <= TOP; k++) {
-      const done = i + 1;
-      if (done & ((1 << LEVEL_SHIFTS[k - 1]) - 1)) break;
-      levels[k].fold(i >> LEVEL_SHIFTS[k], levels[k - 1], i >> LEVEL_SHIFTS[k - 1]);
-    }
+    summarise(chunk, i, i + 1);
     this.end++;
     this.version++;
+  }
+
+  /** Append the first `n` samples of the given arrays; much faster than append() per sample. */
+  appendBlock(cur, bits, n = cur.length) {
+    for (let i = 0; i < n; ) {
+      const chunk = this._tail();
+      const take = Math.min(n - i, CHUNK_SIZE - chunk.len);
+      chunk.cur.set(cur.subarray(i, i + take), chunk.len);
+      chunk.bits.set(bits.subarray(i, i + take), chunk.len);
+      summarise(chunk, chunk.len, chunk.len + take);
+      chunk.len += take;
+      this.end += take;
+      i += take;
+    }
+    this.version++;
+  }
+
+  /** Clamp a sample range to whole indices inside the buffer. */
+  clampRange(from, to) {
+    return [Math.max(Math.floor(from), this.start), Math.min(Math.ceil(to), this.end)];
   }
 
   _chunkFor(index) {
@@ -205,8 +210,7 @@ export class SampleStore {
    * @returns {Agg}
    */
   aggregate(from, to, agg = new Agg()) {
-    from = Math.max(Math.floor(from), this.start);
-    to = Math.min(Math.ceil(to), this.end);
+    [from, to] = this.clampRange(from, to);
     if (to <= from) return agg;
     agg.n += to - from;
     let pos = from;
@@ -221,8 +225,7 @@ export class SampleStore {
 
   /** Iterate contiguous typed-array views covering [from, to). */
   *segments(from, to) {
-    from = Math.max(Math.floor(from), this.start);
-    to = Math.min(Math.ceil(to), this.end);
+    [from, to] = this.clampRange(from, to);
     let i = from;
     while (i < to) {
       const chunk = this._chunkFor(i);
@@ -230,6 +233,33 @@ export class SampleStore {
       const b = Math.min(to - chunk.start, chunk.len);
       yield { start: i, cur: chunk.cur.subarray(a, b), bits: chunk.bits.subarray(a, b) };
       i = chunk.start + b;
+    }
+  }
+}
+
+/**
+ * Add samples [a, b) of a chunk to its pyramid. Only the finest level is
+ * updated per sample; a coarser bucket is filled in when the finer bucket below
+ * it completes. Readers only use complete buckets, so partial coarse buckets
+ * are never seen.
+ */
+function summarise(chunk, a, b) {
+  const { cur, bits, levels } = chunk;
+  const L = levels[1];
+  for (let i = a; i < b; i++) {
+    const value = cur[i];
+    const j = i >> 4;
+    if (value === value) {
+      if (value < L.min[j]) L.min[j] = value;
+      if (value > L.max[j]) L.max[j] = value;
+      L.sum[j] += value;
+      L.cnt[j]++;
+    }
+    L.or[j] |= bits[i];
+    L.and[j] &= bits[i];
+    for (let k = 2; k <= TOP; k++) {
+      if ((i + 1) & ((1 << LEVEL_SHIFTS[k - 1]) - 1)) break;
+      levels[k].fold(i >> LEVEL_SHIFTS[k], levels[k - 1], i >> LEVEL_SHIFTS[k - 1]);
     }
   }
 }

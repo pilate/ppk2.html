@@ -1,44 +1,53 @@
-// Saving and loading recordings.
-//
-// Session file layout (little-endian):
-//   8 bytes   magic "WPPK2SES"
-//   uint32    format version (1)
-//   uint32    header length in bytes
-//   header    UTF-8 JSON: { sampleRate, count, timeOffset, startedAt, mode, vdd, ... }
-//   padding   to a 4-byte boundary
-//   float32[count]  current in µA (NaN = lost sample)
-//   uint8[count]    digital channels D0..D7
+// Getting recordings and exports in and out of the browser: the save dialog
+// (or a download where there isn't one, e.g. Firefox), .ppk2 save/load, CSV
+// and PNG export.
 
-import { SampleStore } from './store.js';
+import { readPpk2, writePpk2 } from './ppk2file.js';
+import { DIGITAL_CHANNELS } from './protocol.js';
+import { memorySink } from './zip.js';
 
-const MAGIC = 'WPPK2SES';
-const VERSION = 1;
-const FIXED_HEAD = 16; // magic + version + header length
-const BLOCK = 1 << 20;
+const TYPES = {
+  ppk2: { description: 'Power Profiler recording', mime: 'application/octet-stream' },
+  csv: { description: 'CSV', mime: 'text/csv' },
+};
 
-/** Byte offset of the sample data for a JSON header of `jsonLen` bytes. */
-const dataOffset = (jsonLen) => Math.ceil((FIXED_HEAD + jsonLen) / 4) * 4;
+/** "D0-D7" column text for each bits value, D0 first. */
+const BIT_STRINGS = Array.from({ length: 256 }, (_, b) => {
+  let s = '';
+  for (let ch = 0; ch < DIGITAL_CHANNELS; ch++) s += (b >> ch) & 1;
+  return s;
+});
 
-/** Ask for a destination file; falls back to a download when the File System Access API is missing. */
-async function openSink(suggestedName, description, mime, ext) {
+/**
+ * Ask where to save a file of the given type. Returns a sink ({ write, patch,
+ * close, abort }); without the File System Access API it collects the bytes
+ * and downloads them on close.
+ */
+async function openSink(ext) {
+  const { description, mime } = TYPES[ext];
+  const name = fileName(ext);
   if ('showSaveFilePicker' in window) {
     const handle = await window.showSaveFilePicker({
-      suggestedName,
-      types: [{ description, accept: { [mime]: [ext] } }],
+      suggestedName: name,
+      types: [{ description, accept: { [mime]: [`.${ext}`] } }],
     });
     const writable = await handle.createWritable();
+    let end = 0;
     return {
-      write: (part) => writable.write(part),
+      write: async (bytes) => {
+        await writable.write(bytes);
+        end += bytes.length;
+      },
+      patch: async (position, bytes) => {
+        await writable.write({ type: 'write', position, data: bytes });
+        await writable.seek(end);
+      },
       close: () => writable.close(),
       abort: () => writable.abort(),
     };
   }
-  const parts = [];
-  return {
-    write: async (part) => parts.push(part),
-    close: async () => download(new Blob(parts, { type: mime }), suggestedName),
-    abort: async () => {},
-  };
+  const sink = memorySink();
+  return { ...sink, close: async () => download(sink.blob(mime), name), abort: async () => {} };
 }
 
 function download(blob, name) {
@@ -64,37 +73,10 @@ function fileName(ext, date = new Date()) {
   return `ppk2-${d}-${t}.${ext}`;
 }
 
-/**
- * Write the whole recording as a session file.
- * @param {SampleStore} store
- * @param {object} info extra header fields
- * @param {(fraction: number) => void} [progress]
- */
-export async function saveSession(store, info, progress) {
-  const from = store.start;
-  const to = store.end;
-  const json = new TextEncoder().encode(
-    JSON.stringify({ app: 'ppk2.html', sampleRate: store.sampleRate, count: to - from, timeOffset: store.timeOf(from), ...info }),
-  );
-  const head = new Uint8Array(dataOffset(json.length));
-  head.set(new TextEncoder().encode(MAGIC), 0);
-  const dv = new DataView(head.buffer);
-  dv.setUint32(8, VERSION, true);
-  dv.setUint32(12, json.length, true);
-  head.set(json, FIXED_HEAD);
-
-  const sink = await openSink(fileName('wppk2'), 'PPK2 session', 'application/octet-stream', '.wppk2');
+async function saveTo(ext, write) {
+  const sink = await openSink(ext);
   try {
-    await sink.write(head);
-    const total = (to - from) * 2;
-    let done = 0;
-    for (const field of ['cur', 'bits']) {
-      for (const seg of store.segments(from, to)) {
-        await sink.write(seg[field]);
-        done += seg[field].length;
-        progress?.(done / total);
-      }
-    }
+    await write(sink);
     await sink.close();
   } catch (e) {
     await sink.abort();
@@ -102,78 +84,41 @@ export async function saveSession(store, info, progress) {
   }
 }
 
-/**
- * Read a session file into a new store sized to hold all of it.
- * @param {File} file
- * @returns {Promise<{ store: SampleStore, header: object }>}
- */
-export async function loadSession(file, maxBytes, progress) {
-  const head = new Uint8Array(await file.slice(0, FIXED_HEAD).arrayBuffer());
-  if (new TextDecoder().decode(head.subarray(0, MAGIC.length)) !== MAGIC) {
-    throw new Error(`${file.name} is not a session saved by this app.`);
-  }
-  const dv = new DataView(head.buffer);
-  if (dv.getUint32(8, true) > VERSION) throw new Error(`${file.name} was saved by a newer version of this app.`);
-  const jsonLen = dv.getUint32(12, true);
-  const header = JSON.parse(new TextDecoder().decode(await file.slice(FIXED_HEAD, FIXED_HEAD + jsonLen).arrayBuffer()));
-  const curStart = dataOffset(jsonLen);
-  const count = header.count;
-  const bitsStart = curStart + count * 4;
-  if (file.size < bitsStart + count) throw new Error(`${file.name} is truncated.`);
-
-  const store = new SampleStore(header.sampleRate, Math.max(maxBytes, SampleStore.bytesFor(count)));
-  store.timeOffset = header.timeOffset ?? 0;
-  for (let i = 0; i < count; i += BLOCK) {
-    const n = Math.min(BLOCK, count - i);
-    const [curBuf, bitsBuf] = await Promise.all([
-      file.slice(curStart + i * 4, curStart + (i + n) * 4).arrayBuffer(),
-      file.slice(bitsStart + i, bitsStart + i + n).arrayBuffer(),
-    ]);
-    const cur = new Float32Array(curBuf);
-    const bits = new Uint8Array(bitsBuf);
-    for (let k = 0; k < n; k++) store.append(cur[k], bits[k]);
-    progress?.((i + n) / count);
-  }
-  return { store, header };
+/** Save the whole recording as a .ppk2 file. */
+export function saveSession(store, info, progress) {
+  return saveTo('ppk2', (sink) => writePpk2(sink, store, info, progress));
 }
 
-/**
- * CSV with the same columns as nRF Connect's Power Profiler export.
- * @param {SampleStore} store
- */
-export async function exportCsv(store, from, to, { digital = true } = {}, progress) {
-  from = Math.max(store.start, Math.floor(from));
-  to = Math.min(store.end, Math.ceil(to));
-  const sink = await openSink(fileName('csv'), 'CSV', 'text/csv', '.csv');
+/** Open a .ppk2 file (ours or nRF Connect's). */
+export function loadSession(file, progress) {
+  return readPpk2(file, progress);
+}
+
+/** Export samples [from, to) as CSV with the same columns as nRF Connect's export. */
+export function exportCsv(store, from, to, options, progress) {
+  return saveTo('csv', (sink) => writeCsv(sink, store, from, to, options, progress));
+}
+
+export async function writeCsv(sink, store, from, to, { digital = true } = {}, progress) {
+  [from, to] = store.clampRange(from, to);
   const enc = new TextEncoder();
   const tDecimals = Math.max(0, Math.ceil(Math.log10(store.sampleRate / 1000)));
-  const bitStr = Array.from({ length: 256 }, (_, b) => {
-    let s = '';
-    for (let ch = 0; ch < 8; ch++) s += (b >> ch) & 1;
-    return s;
-  });
-  try {
-    await sink.write(enc.encode(digital ? 'Timestamp(ms),Current(uA),D0-D7\n' : 'Timestamp(ms),Current(uA)\n'));
-    let lines = [];
-    for (const seg of store.segments(from, to)) {
-      for (let k = 0; k < seg.cur.length; k++) {
-        const t = (store.timeOf(seg.start + k) * 1000).toFixed(tDecimals);
-        const v = seg.cur[k];
-        const val = v === v ? v.toFixed(4) : '';
-        lines.push(digital ? `${t},${val},${bitStr[seg.bits[k]]}` : `${t},${val}`);
-        if (lines.length === 65536) {
-          await sink.write(enc.encode(lines.join('\n') + '\n'));
-          lines = [];
-          progress?.((seg.start + k - from) / (to - from));
-        }
+  await sink.write(enc.encode(digital ? 'Timestamp(ms),Current(uA),D0-D7\n' : 'Timestamp(ms),Current(uA)\n'));
+  let lines = [];
+  for (const seg of store.segments(from, to)) {
+    for (let k = 0; k < seg.cur.length; k++) {
+      const t = (store.timeOf(seg.start + k) * 1000).toFixed(tDecimals);
+      const v = seg.cur[k];
+      const val = v === v ? v.toFixed(4) : '';
+      lines.push(digital ? `${t},${val},${BIT_STRINGS[seg.bits[k]]}` : `${t},${val}`);
+      if (lines.length === 65536) {
+        await sink.write(enc.encode(lines.join('\n') + '\n'));
+        lines = [];
+        progress?.((seg.start + k - from) / (to - from));
       }
     }
-    if (lines.length) await sink.write(enc.encode(lines.join('\n') + '\n'));
-    await sink.close();
-  } catch (e) {
-    await sink.abort();
-    throw e;
   }
+  if (lines.length) await sink.write(enc.encode(lines.join('\n') + '\n'));
 }
 
 export function savePng(canvas) {

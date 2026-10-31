@@ -242,3 +242,24 @@ test('end to end with the simulated device', async () => {
   assert.ok(agg.min > 0 && agg.min < 10, `min ${agg.min}`);
   assert.ok(agg.max > 2000 && agg.max < 40_000, `max ${agg.max}`);
 });
+
+test('appendBlock builds the same summaries as append', () => {
+  const one = new SampleStore(100_000, 0);
+  const block = new SampleStore(100_000, 0);
+  const n = CHUNK_SIZE + 123_457;
+  const cur = new Float32Array(n);
+  const bits = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    cur[i] = i % 5003 === 0 ? NaN : Math.fround(Math.sin(i / 97) * 100);
+    bits[i] = (i >> 7) & 0xff;
+    one.append(cur[i], bits[i]);
+  }
+  // Odd block sizes so blocks straddle buckets and the chunk boundary.
+  for (let i = 0; i < n; i += 70_001) block.appendBlock(cur.subarray(i, i + 70_001), bits.subarray(i, i + 70_001));
+  assert.equal(block.end, n);
+  for (const [a, b] of [[0, n], [17, 4113], [CHUNK_SIZE - 300, CHUNK_SIZE + 70_000], [65_535, 1_000_001]]) {
+    const x = one.aggregate(a, b);
+    const y = block.aggregate(a, b);
+    assert.deepEqual([y.min, y.max, y.sum, y.cnt, y.or, y.and], [x.min, x.max, x.sum, x.cnt, x.or, x.and], `[${a}, ${b})`);
+  }
+});

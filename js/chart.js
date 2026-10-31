@@ -1,6 +1,7 @@
 // Canvas chart for current and digital channels, plus the overview strip.
 
 import * as fmt from './format.js';
+import { DIGITAL_CHANNELS } from './protocol.js';
 import { Agg } from './store.js';
 
 const AXIS_W = 76;
@@ -348,9 +349,10 @@ export class Chart {
     if (!store || !store.length) return;
     if (spp < 1) {
       const raw = this._raw;
-      raw.from = Math.max(store.start, Math.floor(from));
+      const [a, b] = store.clampRange(from, to + 1);
+      raw.from = a;
       raw.n = 0;
-      for (const seg of store.segments(raw.from, Math.min(store.end, Math.ceil(to) + 1))) {
+      for (const seg of store.segments(a, b)) {
         for (let k = 0; k < seg.cur.length; k++) {
           const v = seg.cur[k];
           raw.v[raw.n] = v;
@@ -556,7 +558,7 @@ export class Chart {
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     let lane = 0;
-    for (let ch = 0; ch < 8; ch++) {
+    for (let ch = 0; ch < DIGITAL_CHANNELS; ch++) {
       if (!(this.channels & (1 << ch))) continue;
       const top = d.y + lane++ * LANE_H;
       const hiY = top + 3;

@@ -33,8 +33,8 @@
         <section class="panel" id="sec-device">
           <h2>Device</h2>
           <p class="notice" id="unsupported" hidden>
-            This browser can't talk to USB serial devices. Open the page in Chrome or Edge on a desktop computer to
-            connect a PPK2. The simulated device still works.
+            This browser can't talk to USB serial devices. To connect a PPK2, open the page in a desktop browser with
+            Web Serial, such as Chrome or Edge. Recordings and the simulated device still work here.
           </p>
           <div class="stack" data-when="disconnected">
             <button class="btn primary" id="btn-connect" type="button">Connect PPK2</button>
@@ -140,7 +140,7 @@
           <div class="stack">
             <button class="btn" id="btn-save" type="button">Save recording</button>
             <button class="btn" id="btn-open" type="button">Open recording</button>
-            <input type="file" id="file-open" accept=".wppk2" hidden />
+            <input type="file" id="file-open" accept=".ppk2" hidden />
             <button class="btn" id="btn-csv-sel" type="button">Export selection as CSV</button>
             <button class="btn" id="btn-csv-all" type="button">Export everything as CSV</button>
             <label class="check"><input type="checkbox" id="csv-digital" /> Include digital channels in CSV</label>

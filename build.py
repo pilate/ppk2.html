@@ -7,8 +7,10 @@ the stylesheet and bundles the modules into a single <script>, so the output
 can be opened straight from disk or hosted as one file.
 
 Each module becomes a function scope returning its exports, so top-level names
-can't collide; imports become lookups on those export objects. This handles
-the import/export forms the app uses and fails loudly on anything else.
+can't collide; imports become lookups on those export objects. Supported forms:
+`import { a, b as c } from './x.js'`, `import * as x from './x.js'`, and
+`export` in front of function, async function, class or const (one name per
+declaration). Anything else stops the build.
 
 Usage: python3 build.py
 """
@@ -22,7 +24,7 @@ SOURCE = ROOT / 'ppk2.html'
 OUTPUT = ROOT / 'dist' / 'ppk2.html'
 
 IMPORT_RE = re.compile(r"^import\s+(.+?)\s+from\s+'\./([\w-]+)\.js';\n", re.M | re.S)
-EXPORT_DECL_RE = re.compile(r'^export\s+(?:async\s+)?(?:function\*?|class|const|let)\s+([A-Za-z_$][\w$]*)', re.M)
+EXPORT_RE = re.compile(r'^export\s+((?:async\s+)?(?:function\*?|class|const)\s+([A-Za-z_$][\w$]*))', re.M)
 
 
 def module_var(name):
@@ -52,10 +54,11 @@ def load_module(name, modules, order):
             sys.exit(f'build: unsupported import in {name}.js: import {clause}')
     body = IMPORT_RE.sub('', src)
 
-    exports = EXPORT_DECL_RE.findall(body)
-    body = re.sub(r'^export\s+(?=(?:async\s+)?(?:function|class|const|let)\b)', '', body, flags=re.M)
-    if re.search(r'^\s*export\b', body, re.M):
-        sys.exit(f'build: unsupported export form in {name}.js')
+    exports = []
+    body = EXPORT_RE.sub(lambda m: exports.append(m[2]) or m[1], body)
+    for keyword in ('import', 'export'):
+        if re.search(rf'^\s*{keyword}\b', body, re.M):
+            sys.exit(f'build: unsupported {keyword} form in {name}.js')
 
     modules[name] = (
         f'// ---- js/{name}.js\n'
