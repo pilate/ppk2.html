@@ -28,6 +28,10 @@
   --display: 'Barlow Semi Condensed', 'Barlow', system-ui, sans-serif;
   --chart-font: 500 12px 'Barlow', system-ui, sans-serif;
 
+  --ctl-w: 124px; /* control column in settings rows */
+  --ctl-h: 34px;
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%235b6870' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+
   color-scheme: light;
 }
 
@@ -55,6 +59,7 @@
     --btn-hover: #2d363d;
     --primary-ink: #0d1a26;
     --shadow: none;
+    --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239aa7af' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     color-scheme: dark;
   }
 }
@@ -205,7 +210,7 @@ select {
 /* ---- side panels ---------------------------------------------------------- */
 
 .panel {
-  padding: 14px 20px 16px;
+  padding: 16px 20px 18px;
   border-bottom: 1px solid var(--rule-soft);
   display: flex;
   flex-direction: column;
@@ -214,50 +219,58 @@ select {
 
 .panel h2 {
   font-size: 15px;
+  line-height: 20px;
 }
 
 .panel h3 {
   font-size: 14px;
-  margin-top: 6px;
 }
 
+/* Collapsible panels lay out their content in a body element; flex gap doesn't apply inside <details> everywhere. */
 details.panel {
-  gap: 0;
+  display: block;
 }
 
-details.panel[open] {
+.panel-body {
+  display: flex;
+  flex-direction: column;
   gap: 12px;
+  margin-top: 14px;
 }
 
+/* Heading on the left, state and chevron on the right, so headings line up with plain sections. */
 details.panel > summary {
   list-style: none;
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 details.panel > summary::-webkit-details-marker {
   display: none;
 }
 
-details.panel > summary::before {
+details.panel > summary h2 {
+  flex: 1;
+}
+
+details.panel > summary::after {
   content: '';
   width: 7px;
   height: 7px;
+  margin-right: 3px;
   border-right: 2px solid var(--muted);
   border-bottom: 2px solid var(--muted);
-  transform: rotate(-45deg);
+  transform: translateY(-2px) rotate(45deg);
   transition: transform 0.15s;
-  margin-right: 2px;
 }
 
-details.panel[open] > summary::before {
-  transform: rotate(45deg) translate(-2px, -1px);
+details.panel[open] > summary::after {
+  transform: translateY(2px) rotate(-135deg);
 }
 
 .summary-state {
-  margin-left: auto;
   color: var(--muted);
   font-size: 14px;
 }
@@ -265,6 +278,16 @@ details.panel[open] > summary::before {
 .summary-state[data-on='true'] {
   color: var(--trigger);
   font-weight: 500;
+}
+
+/* A titled block inside a panel, set off by a rule. */
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule-soft);
 }
 
 [data-disabled='true'] {
@@ -275,13 +298,21 @@ details.panel[open] > summary::before {
 .stack {
   display: flex;
   flex-direction: column;
+  gap: 10px;
+}
+
+.pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
 
+/* A hint describes the control or heading just above it. */
 .hint {
-  margin: -4px 0 0;
+  margin: -6px 0 0;
   color: var(--muted);
   font-size: 13.5px;
+  line-height: 1.4;
 }
 
 .hint:empty {
@@ -320,8 +351,8 @@ details.panel[open] > summary::before {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 36px;
-  padding: 6px 14px;
+  min-height: var(--ctl-h);
+  padding: 5px 12px;
   border: 1px solid var(--rule);
   border-radius: 6px;
   background: var(--btn-bg);
@@ -362,9 +393,13 @@ details.panel[open] > summary::before {
 }
 
 .btn.small {
-  min-height: 30px;
+  min-height: 28px;
   padding: 3px 10px;
   font-size: 14px;
+}
+
+.btn.end {
+  align-self: flex-end;
 }
 
 .icon-btn {
@@ -415,7 +450,7 @@ details.panel[open] > summary::before {
 }
 
 .seg button {
-  min-height: 30px;
+  min-height: 28px;
   padding: 3px 10px;
   border: 0;
   border-radius: 6px;
@@ -443,39 +478,84 @@ details.panel[open] > summary::before {
 .field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
-.field-row {
+/* A setting: label on the left, control in a fixed-width column on the right. */
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--ctl-w);
+  align-items: center;
+  column-gap: 12px;
+  min-height: var(--ctl-h);
+}
+
+/* A bordered control: a number with its unit inside, or a select. */
+.box {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  width: 100%;
+  height: var(--ctl-h);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background-color: var(--plot-bg);
+  overflow: hidden;
 }
 
-.num-unit {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.box:focus-within {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+.box input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px 0 10px;
+  border: 0;
+  background: transparent;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+}
+
+.box input:last-child {
+  padding-right: 10px;
+}
+
+.box .unit {
+  padding: 0 10px 0 2px;
   color: var(--muted);
 }
 
-input[type='number'],
-select {
-  height: 32px;
-  padding: 3px 8px;
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  background: var(--plot-bg);
-  font-variant-numeric: tabular-nums;
+.box select {
+  height: 100%;
+  padding: 0 24px 0 8px;
+  border: 0;
+  border-left: 1px solid var(--rule-soft);
+  border-radius: 0;
+  outline: none;
 }
 
 input[type='number'] {
-  width: 92px;
-  text-align: right;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 select {
+  height: var(--ctl-h);
+  padding: 0 28px 0 10px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--plot-bg) var(--chevron) no-repeat right 10px center / 10px 6px;
+  appearance: none;
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
 }
 
@@ -484,10 +564,9 @@ input[type='range'] {
   accent-color: var(--trace);
 }
 
+/* Switch rows: label on the left, switch on the right edge of the control column. */
 .toggle {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
   cursor: pointer;
 }
 
@@ -539,18 +618,6 @@ input[type='range'] {
   cursor: not-allowed;
 }
 
-.check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  color: var(--muted);
-}
-
-.check input {
-  accent-color: var(--trace);
-}
-
 .chips {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
@@ -558,7 +625,9 @@ input[type='range'] {
 }
 
 .chips button {
+  min-width: 0;
   height: 30px;
+  padding: 0;
   border: 1px solid var(--rule);
   border-radius: 6px;
   background: transparent;
@@ -572,14 +641,6 @@ input[type='range'] {
   background: var(--digital);
   border-color: var(--digital);
   color: var(--plot-bg);
-}
-
-.gains {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 6px 12px;
-  align-items: center;
-  font-size: 14px;
 }
 
 .calib > summary {

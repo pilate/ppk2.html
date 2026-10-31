@@ -58,28 +58,28 @@
           </div>
           <p class="hint" id="mode-hint"></p>
           <div class="field" id="vdd-field">
-            <div class="field-row">
+            <div class="row">
               <label for="vdd-num">Supply voltage</label>
-              <span class="num-unit"><input id="vdd-num" type="number" min="800" max="5000" step="10" /> mV</span>
+              <span class="box"><input id="vdd-num" type="number" min="800" max="5000" step="10" /><span class="unit">mV</span></span>
             </div>
             <input id="vdd" type="range" min="800" max="5000" step="10" aria-label="Supply voltage" />
           </div>
-          <label class="toggle">
+          <label class="row toggle">
+            <span>Enable power output</span>
             <input type="checkbox" id="dut-power" />
             <span class="toggle-track" aria-hidden="true"></span>
-            <span>Enable power output</span>
           </label>
         </section>
 
         <section class="panel" id="sec-sampling" data-needs="device">
           <h2>Sampling</h2>
-          <div class="field-row">
+          <div class="row">
             <label for="rate">Sample rate</label>
-            <select id="rate"></select>
+            <select class="box" id="rate"></select>
           </div>
-          <div class="field-row">
+          <div class="row">
             <label for="limit">Stop after</label>
-            <span class="num-unit"><input id="limit" type="number" min="0" step="any" placeholder="no limit" /> s</span>
+            <span class="box"><input id="limit" type="number" min="0" step="any" placeholder="no limit" /><span class="unit">s</span></span>
           </div>
           <button class="btn primary big" id="btn-start" type="button">Start</button>
           <p class="hint" id="buffer-hint"></p>
@@ -87,103 +87,123 @@
 
         <details class="panel" id="sec-trigger">
           <summary><h2>Trigger</h2><span class="summary-state" id="trig-summary">Off</span></summary>
-          <label class="toggle">
-            <input type="checkbox" id="trig-on" />
-            <span class="toggle-track" aria-hidden="true"></span>
-            <span>Wait for a trigger before showing data</span>
-          </label>
-          <div class="field-row">
-            <label for="trig-level">Level</label>
-            <span class="num-unit">
-              <input id="trig-level" type="number" step="any" />
-              <select id="trig-unit" aria-label="Level unit">
-                <option value="1">µA</option>
-                <option value="1000">mA</option>
-              </select>
-            </span>
+          <div class="panel-body">
+            <label class="row toggle">
+              <span>Wait for a trigger</span>
+              <input type="checkbox" id="trig-on" />
+              <span class="toggle-track" aria-hidden="true"></span>
+            </label>
+            <div class="row">
+              <label for="trig-level">Level</label>
+              <span class="box">
+                <input id="trig-level" type="number" step="any" />
+                <select id="trig-unit" aria-label="Level unit">
+                  <option value="1">µA</option>
+                  <option value="1000">mA</option>
+                </select>
+              </span>
+            </div>
+            <div class="seg" role="radiogroup" aria-label="Edge" id="trig-edge">
+              <button type="button" role="radio" data-value="rising">Rising edge</button>
+              <button type="button" role="radio" data-value="falling">Falling edge</button>
+            </div>
+            <div class="row">
+              <label for="trig-window">Capture length</label>
+              <span class="box"><input id="trig-window" type="number" min="0.01" step="any" /><span class="unit">ms</span></span>
+            </div>
+            <div class="row">
+              <label for="trig-pre">Before trigger</label>
+              <span class="box"><input id="trig-pre" type="number" min="0" max="90" step="1" /><span class="unit">%</span></span>
+            </div>
+            <div class="seg" role="radiogroup" aria-label="Trigger mode" id="trig-mode">
+              <button type="button" role="radio" data-value="single">Single</button>
+              <button type="button" role="radio" data-value="continuous">Continuous</button>
+            </div>
+            <p class="hint" id="trig-status"></p>
           </div>
-          <div class="seg" role="radiogroup" aria-label="Edge" id="trig-edge">
-            <button type="button" role="radio" data-value="rising">Rising edge</button>
-            <button type="button" role="radio" data-value="falling">Falling edge</button>
-          </div>
-          <div class="field-row">
-            <label for="trig-window">Capture length</label>
-            <span class="num-unit"><input id="trig-window" type="number" min="0.01" step="any" /> ms</span>
-          </div>
-          <div class="field-row">
-            <label for="trig-pre">Before trigger</label>
-            <span class="num-unit"><input id="trig-pre" type="number" min="0" max="90" step="1" /> %</span>
-          </div>
-          <div class="seg" role="radiogroup" aria-label="Trigger mode" id="trig-mode">
-            <button type="button" role="radio" data-value="single">Single</button>
-            <button type="button" role="radio" data-value="continuous">Continuous</button>
-          </div>
-          <p class="hint" id="trig-status"></p>
         </details>
 
         <details class="panel" id="sec-display" open>
           <summary><h2>Display</h2></summary>
-          <div class="seg" role="radiogroup" aria-label="Current axis" id="yscale">
-            <button type="button" role="radio" data-value="linear">Linear</button>
-            <button type="button" role="radio" data-value="log">Logarithmic</button>
+          <div class="panel-body">
+            <div class="seg" role="radiogroup" aria-label="Current axis" id="yscale">
+              <button type="button" role="radio" data-value="linear">Linear</button>
+              <button type="button" role="radio" data-value="log">Logarithmic</button>
+            </div>
+            <label class="row toggle">
+              <span>Digital channels</span>
+              <input type="checkbox" id="show-digital" />
+              <span class="toggle-track" aria-hidden="true"></span>
+            </label>
+            <div class="chips" id="channels" aria-label="Visible digital channels"></div>
           </div>
-          <label class="toggle">
-            <input type="checkbox" id="show-digital" />
-            <span class="toggle-track" aria-hidden="true"></span>
-            <span>Digital channels</span>
-          </label>
-          <div class="chips" id="channels" aria-label="Visible digital channels"></div>
         </details>
 
         <details class="panel" id="sec-files">
           <summary><h2>Files</h2></summary>
-          <div class="stack">
-            <button class="btn" id="btn-save" type="button">Save recording</button>
-            <button class="btn" id="btn-open" type="button">Open recording</button>
+          <div class="panel-body">
+            <div class="pair">
+              <button class="btn" id="btn-open" type="button">Open recording</button>
+              <button class="btn" id="btn-save" type="button">Save recording</button>
+            </div>
             <input type="file" id="file-open" accept=".ppk2" hidden />
-            <button class="btn" id="btn-csv-sel" type="button">Export selection as CSV</button>
-            <button class="btn" id="btn-csv-all" type="button">Export everything as CSV</button>
-            <label class="check"><input type="checkbox" id="csv-digital" /> Include digital channels in CSV</label>
+            <p class="hint">Recordings use the .ppk2 format, so they also open in nRF Connect.</p>
+            <div class="group">
+              <h3>Export as CSV</h3>
+              <div class="pair">
+                <button class="btn" id="btn-csv-sel" type="button">Selection</button>
+                <button class="btn" id="btn-csv-all" type="button">Everything</button>
+              </div>
+              <label class="row toggle">
+                <span>Include digital channels</span>
+                <input type="checkbox" id="csv-digital" />
+                <span class="toggle-track" aria-hidden="true"></span>
+              </label>
+            </div>
             <button class="btn" id="btn-png" type="button">Save chart as image</button>
           </div>
         </details>
 
         <details class="panel" id="sec-advanced">
           <summary><h2>Advanced</h2></summary>
-          <div class="field-row">
-            <label for="buffer">Memory for recording</label>
-            <select id="buffer">
-              <option value="268435456">256 MB</option>
-              <option value="536870912">512 MB</option>
-              <option value="1073741824">1 GB</option>
-              <option value="2147483648">2 GB</option>
-              <option value="4294967296">4 GB</option>
-            </select>
+          <div class="panel-body">
+            <div class="row">
+              <label for="buffer">Memory limit</label>
+              <select class="box" id="buffer">
+                <option value="268435456">256 MB</option>
+                <option value="536870912">512 MB</option>
+                <option value="1073741824">1 GB</option>
+                <option value="2147483648">2 GB</option>
+                <option value="4294967296">4 GB</option>
+              </select>
+            </div>
+            <div class="group">
+              <h3>Spike filter</h3>
+              <p class="hint">Smooths the glitch the PPK2 produces when it switches measurement range.</p>
+              <div class="row">
+                <label for="spike-samples">Samples</label>
+                <span class="box"><input id="spike-samples" type="number" min="1" max="10" step="1" /></span>
+              </div>
+              <div class="row">
+                <label for="spike-alpha">Coefficient</label>
+                <span class="box"><input id="spike-alpha" type="number" min="0.01" max="1" step="0.01" /></span>
+              </div>
+              <div class="row">
+                <label for="spike-alpha5">Range 5 coefficient</label>
+                <span class="box"><input id="spike-alpha5" type="number" min="0.01" max="1" step="0.01" /></span>
+              </div>
+              <button class="btn small end" id="btn-spike-reset" type="button">Restore defaults</button>
+            </div>
+            <div class="group" id="gains-group" data-needs="device">
+              <h3>Range gains</h3>
+              <p class="hint">Fine-tune each measurement range. Values are stored on the PPK2.</p>
+              <div class="stack" id="gains"></div>
+            </div>
+            <details class="calib">
+              <summary>Calibration data</summary>
+              <div id="calib-table" class="calib-table"><p class="hint">Connect a device to see its calibration.</p></div>
+            </details>
           </div>
-          <h3>Spike filter</h3>
-          <p class="hint">Smooths the glitch the PPK2 produces when it switches measurement range.</p>
-          <div class="field-row">
-            <label for="spike-samples">Samples to smooth</label>
-            <input id="spike-samples" type="number" min="1" max="10" step="1" />
-          </div>
-          <div class="field-row">
-            <label for="spike-alpha">Coefficient</label>
-            <input id="spike-alpha" type="number" min="0.01" max="1" step="0.01" />
-          </div>
-          <div class="field-row">
-            <label for="spike-alpha5">Coefficient, highest range</label>
-            <input id="spike-alpha5" type="number" min="0.01" max="1" step="0.01" />
-          </div>
-          <button class="btn small" id="btn-spike-reset" type="button">Restore defaults</button>
-
-          <h3>Range gains</h3>
-          <p class="hint">Fine-tune each measurement range. Values are stored on the PPK2.</p>
-          <div class="gains" id="gains" data-needs="device"></div>
-
-          <details class="calib">
-            <summary>Calibration data</summary>
-            <div id="calib-table" class="calib-table"><p class="hint">Connect a device to see its calibration.</p></div>
-          </details>
         </details>
       </aside>
 

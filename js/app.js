@@ -210,12 +210,11 @@ function renderDevice() {
   const gains = $('gains');
   gains.innerHTML = '';
   device.userGains.forEach((gain, r) => {
+    const row = Object.assign(document.createElement('div'), { className: 'row' });
     const label = document.createElement('label');
     label.htmlFor = `gain-${r}`;
-    label.textContent =
-      r === 0 ? 'Range 1, lowest current' : r === RANGE_COUNT - 1 ? `Range ${r + 1}, highest current` : `Range ${r + 1}`;
-    const wrap = document.createElement('span');
-    wrap.className = 'num-unit';
+    label.textContent = r === 0 ? 'Range 1 (lowest)' : r === RANGE_COUNT - 1 ? `Range ${r + 1} (highest)` : `Range ${r + 1}`;
+    const box = Object.assign(document.createElement('span'), { className: 'box' });
     const input = Object.assign(document.createElement('input'), {
       type: 'number',
       id: `gain-${r}`,
@@ -227,8 +226,9 @@ function renderDevice() {
     input.addEventListener('change', () =>
       guarded(() => device?.setUserGain(r, readNumber(input, { min: 80, max: 120, fallback: 100 }) / 100)),
     );
-    wrap.append(input, ' %');
-    gains.append(label, wrap);
+    box.append(input, Object.assign(document.createElement('span'), { className: 'unit', textContent: '%' }));
+    row.append(label, box);
+    gains.append(row);
   });
 
   // Calibration table
