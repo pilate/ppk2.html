@@ -189,8 +189,9 @@ export class DemoTransport {
       const now = performance.now();
       owed += ((now - last) / 1000) * SAMPLE_RATE;
       last = now;
-      const n = Math.min(Math.floor(owed), SAMPLE_RATE / 2);
-      owed -= n;
+      // A background tab runs this timer rarely; send what's owed at once, but at most 5 s of it.
+      const n = Math.min(Math.floor(owed), 5 * SAMPLE_RATE);
+      owed = 0;
       if (n > 0) this._send(this._generate(n));
     }, 15);
   }

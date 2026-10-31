@@ -386,7 +386,8 @@ export class Chart {
       this._seenEnd = end;
       this._lastGrowth = now;
     }
-    const dt = this._lastTick ? Math.min(0.1, (now - this._lastTick) / 1000) : 0;
+    const gap = this._lastTick ? now - this._lastTick : 0;
+    const dt = Math.min(0.1, gap / 1000);
     this._lastTick = now;
     if (!this.live) return false;
     const prev = this._liveEnd;
@@ -398,7 +399,9 @@ export class Chart {
       const target = end - Math.max(0.06 * this.rate, 2);
       let next = prev + dt * this.rate;
       next += (target - next) * 0.08;
-      if (Math.abs(target - next) > 0.5 * this.rate) next = target; // start, or a long stall
+      // Jump rather than chase when far behind: at the start, after the tab was in the background
+      // (no frames for a while), or when buffered data arrives faster than real time.
+      if (gap > 200 || Math.abs(target - next) > Math.max(0.25 * this.rate, 4)) next = target;
       this._liveEnd = Math.min(next, end);
     }
     return this._liveEnd !== prev;
